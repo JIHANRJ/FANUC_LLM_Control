@@ -14,17 +14,17 @@ from config import (
     OLLAMA_STREAM,
     OLLAMA_TEMPERATURE,
     OLLAMA_TIMEOUT_SECONDS,
-    SYSTEM_PROMPT,
 )
 from core.parser import safely_parse_json
 from llm.base_interface import LLMInterface
+from llm.prompt_builder import build_prompt
 
 
 class OllamaInterface(LLMInterface):
     """LLM adapter that sends parsing prompts to a local Ollama server."""
 
     def _build_prompt(self, text: str) -> str:
-        return f"{SYSTEM_PROMPT}\n\nInput: {text}\nOutput:"
+        return build_prompt(text)
 
     def _call_ollama(self, model_name: str, prompt: str) -> str:
         payload = {
