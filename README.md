@@ -23,10 +23,16 @@ project_root/
 - `llm/`
 - `base_interface.py`: Abstract interface for any LLM backend.
 - `ollama_interface.py`: Ollama implementation (`/api/generate`).
-- `prompt_builder.py`: Builds prompts dynamically from JSON schema files.
+- `prompt_builder.py`: Builds prompts dynamically from schema + tool registry + curated action prompt packs.
+- `prompts/`
+- `actions/`: One human-editable curated prompt file per action/tool.
+- `templates/`: Reusable action prompt authoring template.
 - `schemas/`
-- `robot_command_v1.json`: Default output contract and examples for the LLM.
+- `move_joints_v1.json`: Increment 1 output contract (single-joint move).
+- `robot_command_v1.json`: Compatibility schema from earlier iterations.
 - `registry.py`: Loads and validates schema JSON files.
+- `tools/`
+- `tool_registry_v1.json`: Increment 1 local tool registry (simulator-only).
 - `config.py`: Runtime config (model, API URL, limits, active schema).
 - `main.py`: App entrypoint and end-to-end pipeline.
 - `requirements.txt`: Python dependency list.
@@ -41,13 +47,19 @@ project_root/
 6. `core/validator.py` enforces intent contract and safety constraints.
 7. `core/dispatcher.py` executes the matching action function.
 
-## Schema-Driven Output (JSON)
+## Schema + Tool + Prompt Modularity
 
 LLM output format is defined in JSON files under `schemas/`.
+Available callable tools are defined in JSON under `tools/`.
+Per-action prompt behavior is curated in plain text/markdown under `prompts/actions/`.
 
 - Active schema is selected with `ACTIVE_OUTPUT_SCHEMA` in `config.py`.
+- Active tool registry is selected with `ACTIVE_TOOL_REGISTRY` in `config.py`.
+- Prompt pack directory is selected with `PROMPT_PACK_DIR` in `config.py`.
 - You can override with environment variable:
-- `OUTPUT_SCHEMA=robot_command_v1`
+- `OUTPUT_SCHEMA=move_joints_v1`
+- `TOOL_REGISTRY=tools/tool_registry_v1.json`
+- `PROMPT_PACK_DIR=prompts/actions`
 
 Each schema JSON contains:
 
@@ -57,7 +69,13 @@ Each schema JSON contains:
 - `rules`: constraints added to the prompt.
 - `examples`: input/output examples used for in-context learning.
 
-This allows non-Python users to tune output structure by editing JSON only.
+This allows non-Python users to tune behavior by editing JSON + per-action prompt files without changing core code.
+
+## Increment 1 Scope
+
+- ROS2 is not attached yet; all execution is simulator-only.
+- Only one tool is first-class in this increment: `move_joints` -> `joint_move`.
+- Goal is to stabilize modular contracts before adding more actions.
 
 ## Setup
 
@@ -102,6 +120,69 @@ Example inputs:
 - `Move joint one by -15 degrees`
 - `Move robot to demo joint position`
 - `J1: 30, J2: 40, J3: 60, J5: 90`
+
+## Sample Console Output
+
+```text
+Command> move joint J1 by ten degrees
+[dispatcher] Executing joint_move: joint=1, delta=10 deg
+
+Structured command:
+{'intent': 'joint_move', 'parameters': {'joint': 1, 'delta': 10}}
+
+Dispatch result:
+{'accepted': True, 'success': True, 'message': 'Simulated joint 1 move by 10 degrees.'}
+
+Command> move joint by fourty degrees please, joint j1
+[dispatcher] Executing joint_move: joint=1, delta=40 deg
+
+Structured command:
+{'intent': 'joint_move', 'parameters': {'joint': 1, 'delta': 40}}
+
+Dispatch result:
+{'accepted': True, 'success': True, 'message': 'Simulated joint 1 move by 40 degrees.'}
+
+Command> move joint by fourty 46.2 degrees, joint 5 not joint 6 please
+[dispatcher] Executing joint_move: joint=5, delta=46.2 deg
+
+Structured command:
+{'intent': 'joint_move', 'parameters': {'joint': 5, 'delta': 46.2}}
+
+Dispatch result:
+{'accepted': True, 'success': True, 'message': 'Simulated joint 5 move by 46.2 degrees.'}
+```
+
+## PIT Abstraction (Direct Function Call)
+
+For direct SDK-style use, call the abstraction in `pit/`:
+
+- `RobotControlLMM.TextCommand(model_name, model_parameters, output_json, prompt)`
+
+It returns structured JSON (Python dict).
+
+Example:
+
+```python
+from pit.robot_control_llm import RobotControlLMM
+
+result = RobotControlLMM.TextCommand(
+	model_name="llama3.1:8b",
+	model_parameters={"temperature": 0.1, "stream": False},
+	output_json={
+		"intent": "string",
+		"parameters": {"joint": "integer", "delta": "number"},
+	},
+	prompt="move joint one by 30 degrees",
+)
+
+print(result)
+```
+
+Quick test script:
+
+```bash
+python pit/test_text_command.py
+```
 
 ## Safety and Validation
 

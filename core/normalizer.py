@@ -10,6 +10,12 @@ ALIAS_MAP: dict[str, str] = {
     "angle": "delta",
 }
 
+INTENT_ALIAS_MAP: dict[str, str] = {
+    "move": "joint_move",
+    "move_joint": "joint_move",
+    "jointmove": "joint_move",
+}
+
 _CARDINAL_WORDS: dict[str, int] = {
     "zero": 0,
     "one": 1,
@@ -176,6 +182,7 @@ def normalize_command(command: dict[str, Any]) -> dict[str, Any]:
     """Normalize command shape, intent format, and parameter naming."""
     raw_intent = command.get("intent", "")
     intent = str(raw_intent).strip().lower()
+    intent = INTENT_ALIAS_MAP.get(intent, intent)
 
     raw_parameters = command.get("parameters", {})
     parameters: dict[str, Any] = {}

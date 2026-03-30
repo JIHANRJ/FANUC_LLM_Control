@@ -1,0 +1,40 @@
+{
+  "name": "move_joints_v1",
+  "description": "Single-joint movement command for Increment 1.",
+  "json_schema": {
+    "intent": "string",
+    "parameters": {
+      "joint": "integer",
+      "delta": "number"
+    }
+  },
+  "rules": [
+    "Always include 'intent' and 'parameters'.",
+    "Use intent 'joint_move' only.",
+    "Output exactly one joint and one delta.",
+    "Numbers must be numeric, not strings.",
+    "No markdown, no extra top-level keys."
+  ],
+  "examples": [
+    {
+      "input": "move joint one by 30 degrees",
+      "output": {
+        "intent": "joint_move",
+        "parameters": {
+          "joint": 1,
+          "delta": 30
+        }
+      }
+    },
+    {
+      "input": "move J4 by minus 20",
+      "output": {
+        "intent": "joint_move",
+        "parameters": {
+          "joint": 4,
+          "delta": -20
+        }
+      }
+    }
+  ]
+}
