@@ -180,9 +180,9 @@ def _extract_delta(value: Any) -> Any:
 
 def normalize_command(command: dict[str, Any]) -> dict[str, Any]:
     """Normalize command shape, intent format, and parameter naming."""
-    raw_intent = command.get("intent", "")
-    intent = str(raw_intent).strip().lower()
-    intent = INTENT_ALIAS_MAP.get(intent, intent)
+    raw_command_name = command.get("command_name", command.get("intent", ""))
+    command_name = str(raw_command_name).strip().lower()
+    command_name = INTENT_ALIAS_MAP.get(command_name, command_name)
 
     raw_parameters = command.get("parameters", {})
     parameters: dict[str, Any] = {}
@@ -198,6 +198,7 @@ def normalize_command(command: dict[str, Any]) -> dict[str, Any]:
                 parameters[normalized_key] = _coerce_numeric(value)
 
     return {
-        "intent": intent,
+        "command_name": command_name,
+        "intent": command_name,
         "parameters": parameters,
     }

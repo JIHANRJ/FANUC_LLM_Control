@@ -4,7 +4,7 @@ move_joints
 Goal:
 Convert natural language into one safe single-joint movement command.
 
-Allowed Intent:
+Allowed Command:
 joint_move
 
 Required Parameters:
@@ -32,6 +32,6 @@ Failure / Ambiguity Handling:
 
 Examples:
 - Input: move joint one by 30 degrees
-  Output: {"intent":"joint_move","parameters":{"joint":1,"delta":30}}
+  Output: {"command_name":"joint_move","parameters":{"joint":1,"delta":30}}
 - Input: move J4 by minus 20
-  Output: {"intent":"joint_move","parameters":{"joint":4,"delta":-20}}
+  Output: {"command_name":"joint_move","parameters":{"joint":4,"delta":-20}}

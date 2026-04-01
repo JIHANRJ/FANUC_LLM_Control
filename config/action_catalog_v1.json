@@ -1,11 +1,12 @@
 {
   "version": "1.0",
-  "description": "Increment 1 tool registry with one simulator-only action.",
-  "tools": [
+  "description": "Action catalog for generic robot command routing.",
+  "actions": [
     {
       "name": "move_joints",
-      "intent": "joint_move",
+      "command_name": "joint_move",
       "description": "Move one joint by a delta angle in degrees.",
+      "handler": "move_joint",
       "parameters": {
         "joint": {
           "type": "integer",

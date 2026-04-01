@@ -7,8 +7,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from config import (
+    ACTIVE_ACTION_CATALOG,
     ACTIVE_OUTPUT_SCHEMA,
-    ACTIVE_TOOL_REGISTRY,
     FALLBACK_MODEL_NAMES,
     MODEL_NAME,
     OLLAMA_API_URL,
@@ -16,13 +16,13 @@ from config import (
     OLLAMA_TIMEOUT_SECONDS,
     PROMPT_PACK_DIR,
 )
+from core.action_catalog import load_action_catalog
 from core.dispatcher import dispatch_command
 from core.normalizer import normalize_command
 from core.prompt_pack_loader import load_prompt_pack
-from core.tool_registry import load_tool_registry
 from core.validator import validate_command
 from llm.prompt_builder import build_prompt
-from pit.robot_control_llm import RobotControlLLM
+from llm.robot_control_llm import RobotControlLLM
 from schemas.registry import get_output_schema
 
 
@@ -84,15 +84,15 @@ def startup_preflight_check(preferred_model: str | None = None) -> bool:
         return False
 
     try:
-        tools = load_tool_registry(ACTIVE_TOOL_REGISTRY)
-        print(f"[startup-check] Loaded tool registry: {ACTIVE_TOOL_REGISTRY} ({len(tools)} tool(s))")
+        actions = load_action_catalog(ACTIVE_ACTION_CATALOG)
+        print(f"[startup-check] Loaded action catalog: {ACTIVE_ACTION_CATALOG} ({len(actions)} action(s))")
     except Exception as exc:  # noqa: BLE001
-        print(f"[startup-check] Failed to load tool registry {ACTIVE_TOOL_REGISTRY!r}: {exc}")
+        print(f"[startup-check] Failed to load action catalog {ACTIVE_ACTION_CATALOG!r}: {exc}")
         return False
 
     try:
-        for tool in tools:
-            load_prompt_pack(PROMPT_PACK_DIR, tool.prompt_pack)
+        for action in actions:
+            load_prompt_pack(PROMPT_PACK_DIR, action.prompt_pack)
         print(f"[startup-check] Loaded prompt packs from: {PROMPT_PACK_DIR}")
     except Exception as exc:  # noqa: BLE001
         print(f"[startup-check] Failed to load prompt packs from {PROMPT_PACK_DIR!r}: {exc}")

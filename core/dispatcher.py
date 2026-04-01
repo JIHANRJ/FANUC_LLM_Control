@@ -1,33 +1,31 @@
-"""Intent dispatcher that maps validated commands to executable actions."""
+"""Command dispatcher that maps validated commands to executable actions."""
 
 from __future__ import annotations
 
-from typing import Any
+from config import ACTIVE_ACTION_CATALOG
+from core.action_catalog import load_action_catalog
+from core.action_registry import get_action_handler
 
-from actions.joint_demo import modular_joint_demo
-
-
-def _execute_joint_move(parameters: dict[str, Any]) -> dict[str, Any]:
-    """Dummy single-joint move action for first-stage integration testing."""
-    joint = parameters["joint"]
-    delta = parameters["delta"]
-    print(f"[dispatcher] Executing joint_move: joint={joint}, delta={delta} deg")
-    return {
-        "accepted": True,
-        "success": True,
-        "message": f"Simulated joint {joint} move by {delta} degrees.",
-    }
+_ACTION_MAP = {item.command_name: item for item in load_action_catalog(ACTIVE_ACTION_CATALOG)}
 
 
-def dispatch_command(command: dict[str, Any]) -> dict[str, Any]:
-    """Route validated commands to their corresponding action handlers."""
-    intent = command["intent"]
+def _get_command_name(command: dict[str, object]) -> str:
+    raw = command.get("command_name", command.get("intent"))
+    if not isinstance(raw, str):
+        raise ValueError("Command payload is missing a string 'command_name'.")
+    return raw
+
+
+def dispatch_command(command: dict[str, object]) -> dict[str, object]:
+    """Route validated commands to corresponding action handlers via catalog."""
+    command_name = _get_command_name(command)
     parameters = command["parameters"]
+    if not isinstance(parameters, dict):
+        raise ValueError("Command 'parameters' must be an object.")
 
-    if intent == "joint_demo":
-        return modular_joint_demo(**parameters)
+    action_def = _ACTION_MAP.get(command_name)
+    if action_def is None:
+        raise ValueError(f"No dispatcher route configured for command: {command_name}")
 
-    if intent == "joint_move":
-        return _execute_joint_move(parameters)
-
-    raise ValueError(f"No dispatcher route configured for intent: {intent}")
+    handler = get_action_handler(action_def.handler)
+    return handler(parameters)

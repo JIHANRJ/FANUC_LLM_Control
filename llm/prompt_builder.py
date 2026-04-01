@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 
-from config import ACTIVE_OUTPUT_SCHEMA, ACTIVE_TOOL_REGISTRY, PROMPT_PACK_DIR
+from config import ACTIVE_ACTION_CATALOG, ACTIVE_OUTPUT_SCHEMA, PROMPT_PACK_DIR
+from core.action_catalog import load_action_catalog
 from core.prompt_pack_loader import load_prompt_pack
-from core.tool_registry import load_tool_registry
 from schemas.registry import get_output_schema
 
 
 def build_prompt(user_text: str, schema_name: str | None = None) -> str:
     """Build the full model prompt from the selected schema definition."""
     schema = get_output_schema(schema_name or ACTIVE_OUTPUT_SCHEMA)
-    tools = load_tool_registry(ACTIVE_TOOL_REGISTRY)
+    actions = load_action_catalog(ACTIVE_ACTION_CATALOG)
 
     lines: list[str] = [
         "You are a robot command parser.",
@@ -33,14 +33,14 @@ def build_prompt(user_text: str, schema_name: str | None = None) -> str:
     lines.extend([f"* {rule}" for rule in schema.rules])
 
     lines.append("")
-    lines.append("Available Tools (Increment 1):")
-    for tool in tools:
-        lines.append(f"- Tool: {tool.name}")
-        lines.append(f"  Intent: {tool.intent}")
-        lines.append(f"  Description: {tool.description}")
-        lines.append(f"  Parameters: {json.dumps(tool.parameters)}")
+    lines.append("Available Actions:")
+    for action in actions:
+        lines.append(f"- Action: {action.name}")
+        lines.append(f"  Command: {action.command_name}")
+        lines.append(f"  Description: {action.description}")
+        lines.append(f"  Parameters: {json.dumps(action.parameters)}")
 
-        curated_prompt = load_prompt_pack(PROMPT_PACK_DIR, tool.prompt_pack)
+        curated_prompt = load_prompt_pack(PROMPT_PACK_DIR, action.prompt_pack)
         lines.append("  Curated Prompt Pack:")
         lines.append(curated_prompt)
 

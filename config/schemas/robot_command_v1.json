@@ -1,12 +1,12 @@
 {
   "name": "robot_command_v1",
-  "description": "Single robot command with intent + parameters payload.",
+  "description": "Single robot command with command_name + parameters payload.",
   "json_schema": {
-    "intent": "string",
+    "command_name": "string",
     "parameters": "object"
   },
   "rules": [
-    "Always include 'intent'.",
+    "Always include 'command_name'.",
     "Always include 'parameters'.",
     "No extra top-level keys.",
     "Numbers must be numeric (not strings).",
@@ -17,7 +17,7 @@
     {
       "input": "Move joint 1 by 30 degrees",
       "output": {
-        "intent": "joint_move",
+        "command_name": "joint_move",
         "parameters": {
           "joint": 1,
           "delta": 30
@@ -25,23 +25,9 @@
       }
     },
     {
-      "input": "Move robot to demo position",
-      "output": {
-        "intent": "joint_demo",
-        "parameters": {
-          "joint_1": 0,
-          "joint_2": -20,
-          "joint_3": 35,
-          "joint_4": 0,
-          "joint_5": 10,
-          "joint_6": 0
-        }
-      }
-    },
-    {
       "input": "Move the joint named J1 40 degrees",
       "output": {
-        "intent": "joint_move",
+        "command_name": "joint_move",
         "parameters": {
           "joint": 1,
           "delta": 40
@@ -51,7 +37,7 @@
     {
       "input": "Move joint one by minus twenty degrees",
       "output": {
-        "intent": "joint_move",
+        "command_name": "joint_move",
         "parameters": {
           "joint": 1,
           "delta": -20

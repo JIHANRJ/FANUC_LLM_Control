@@ -18,7 +18,7 @@ class OutputSchema:
     rules: tuple[str, ...]
     examples: tuple[tuple[str, dict[str, Any]], ...]
 
-SCHEMA_DIR = Path(__file__).resolve().parent
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "config" / "schemas"
 
 
 def _read_schema_file(schema_name: str) -> dict[str, Any]:

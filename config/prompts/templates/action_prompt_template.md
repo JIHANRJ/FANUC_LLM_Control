@@ -4,7 +4,7 @@ Action Name:
 
 Goal:
 
-Allowed Intent:
+Allowed Command:
 
 Required Parameters:
 
