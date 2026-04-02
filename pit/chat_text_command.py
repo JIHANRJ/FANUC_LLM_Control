@@ -102,6 +102,9 @@ def main() -> None:
             print(json.dumps(result.get("normalized_output", {}), indent=2))
             print("\nExecution:")
             print(json.dumps(action_result, indent=2))
+        except ConnectionError as exc:
+            print(f"Error: {exc}")
+            print("Hint: run 'ollama serve' in another terminal, or export OLLAMA_API_URL if Ollama is remote.")
         except Exception as exc:  # noqa: BLE001
             print(f"Error: {exc}")
 

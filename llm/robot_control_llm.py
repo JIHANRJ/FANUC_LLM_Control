@@ -68,7 +68,10 @@ def _call_ollama(model_name: str, model_parameters: dict[str, Any] | None, promp
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Ollama HTTP {exc.code}: {body}") from exc
     except URLError as exc:
-        raise ConnectionError(f"Failed to reach Ollama at {api_url}: {exc}") from exc
+        raise ConnectionError(
+            f"Failed to reach Ollama at {api_url}: {exc}. "
+            "Start Ollama with 'ollama serve' or set OLLAMA_API_URL to the reachable endpoint."
+        ) from exc
 
     envelope = json.loads(raw_body)
     llm_response_text = envelope.get("response", "")

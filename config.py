@@ -8,7 +8,7 @@ MODEL_NAME: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 FALLBACK_MODEL_NAMES: tuple[str, ...] = (
     "llama3.1:latest",
 )
-OLLAMA_API_URL: str = "http://localhost:11434/api/generate"
+OLLAMA_API_URL: str = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11435/api/generate")
 OLLAMA_TEMPERATURE: float = 0.1
 OLLAMA_STREAM: bool = False
 OLLAMA_TIMEOUT_SECONDS: float = 20.0

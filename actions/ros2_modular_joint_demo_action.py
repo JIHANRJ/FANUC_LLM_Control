@@ -31,6 +31,13 @@ def _as_int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _safe_scale(value: Any, fallback: float) -> float:
+    candidate = _as_float(value, fallback)
+    if 0.0 < candidate <= 1.0:
+        return candidate
+    return fallback
+
+
 def _build_target_deg(parameters: dict[str, Any]) -> dict[str, float]:
     target_deg = dict(DEFAULT_TARGET_DEG)
 
@@ -56,10 +63,11 @@ def _build_remote_ros2_cmd(parameters: dict[str, Any]) -> str:
     package_name = os.getenv("FANUC_VM_PACKAGE", "fanuc_tools")
     executable_name = os.getenv("FANUC_VM_EXECUTABLE", "modular_joint_demo")
 
-    planning_group_raw = str(parameters.get("planning_group", "manipulator")).strip()
-    planning_group = planning_group_raw or "manipulator"
-    vel = _as_float(parameters.get("vel"), 0.2)
-    acc = _as_float(parameters.get("acc"), 0.2)
+    planning_group_raw = str(parameters.get("planning_group", "manipulator")).strip().lower()
+    planning_group = "manipulator" if planning_group_raw in {"", "all", "default"} else planning_group_raw
+
+    vel = _safe_scale(parameters.get("vel"), 0.2)
+    acc = _safe_scale(parameters.get("acc"), 0.2)
     startup_delay = _as_float(parameters.get("startup_delay"), 2.0)
     target_deg = _build_target_deg(parameters)
 
