@@ -1,5 +1,5 @@
 # External dependencies for this project.
 # Core pipeline uses Python standard library; Ollama runs as a local service.
-SpeechRecognition
-PyAudio
-pynput
+SpeechRecognition==3.8.1
+PyAudio==0.2.13
+pynput==1.8.1
