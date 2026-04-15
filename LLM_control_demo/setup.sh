@@ -11,22 +11,22 @@ echo "========================================="
 cd "$(dirname "$0")"
 
 echo ""
-echo "✓ Checking Ollama..."
+echo "Checking Ollama..."
 if ! command -v ollama &> /dev/null; then
-    echo "✗ Ollama not found. Please install Ollama first."
+    echo "Error: Ollama not found. Please install Ollama first."
     exit 1
 fi
 
-echo "✓ Ollama is installed"
+echo "Ollama is installed"
 
 echo ""
-echo "✓ Checking Python..."
+echo "Checking Python..."
 if ! command -v python3 &> /dev/null; then
-    echo "✗ Python 3 not found."
+    echo "Error: Python 3 not found."
     exit 1
 fi
 
-echo "✓ Python 3 is available"
+echo "Python 3 is available"
 
 echo ""
 echo "========================================="

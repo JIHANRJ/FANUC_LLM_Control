@@ -40,6 +40,9 @@ def _call_ollama(model_name: str, model_parameters: dict[str, Any] | None, promp
     timeout_seconds = float(params.pop("timeout_seconds", OLLAMA_TIMEOUT_SECONDS))
 
     ollama_options: dict[str, Any] = {"temperature": temperature}
+    # Set default num_predict to 1024 to allow longer output sequences
+    if "num_predict" not in params:
+        params["num_predict"] = 1024
     ollama_options.update(params)
 
     payload = {

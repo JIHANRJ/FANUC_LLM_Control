@@ -141,7 +141,7 @@ source ~/ws_fanuc/install/setup.bash
 ros2 launch fanuc_moveit_config fanuc_moveit.launch.py robot_model:=crx10ia_l use_mock:=true use_rviz:=true
 ```
 
-⚠️ **Important**: This terminal must stay open while you run commands from macOS. Motion will fail if MoveIt is not running.
+**Important**: This terminal must stay open while you run commands from macOS. Motion will fail if MoveIt is not running.
 
 **2. (macOS) Set up SSH key** (one time):
 
@@ -323,8 +323,8 @@ export FANUC_VM_SSH_KEY=~/.ssh/robot_key
 
 **Solution**:
 1. Try simpler, more explicit commands:
-   - ✅ Good: `move joint 1 by 30 degrees`
-   - ❌ Bad: `j1 move 30`
+   - Good: `move joint 1 by 30 degrees`
+   - Bad: `j1 move 30`
 
 2. Use available models and test with a lighter one first:
    ```bash

@@ -9,6 +9,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -67,7 +68,7 @@ def _normalize_target(raw_target: str) -> Optional[str]:
     if not raw_target:
         return None
     
-    target = raw_target.lower().strip()
+    target = raw_target.lower().strip().strip(".,;:!?")
     
     # Direct match
     if target in BOX_CONFIG:
@@ -82,12 +83,11 @@ def _normalize_target(raw_target: str) -> Optional[str]:
     if target in BOX_CONFIG:
         return target
     
-    # Color matching
+    # Exact keyword matching only; the LLM should do the semantic interpretation.
     for color, keywords in COLOR_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in target:
-                if color in BOX_CONFIG:
-                    return color
+            if target == keyword and color in BOX_CONFIG:
+                return color
     
     return None
 
@@ -105,31 +105,52 @@ def _build_io_schema() -> dict:
 
 
 def _get_io_schema_prompt() -> str:
-    """Get detailed prompt to help LLM understand targets."""
-    return """You are a robot command parser for I/O control.
-Parse the user's input to extract movement targets.
+        """Get detailed prompt to help LLM understand targets."""
+        return """You are the primary natural-language interpreter for a FANUC I/O controller.
 
-Available targets: red, blue, home
+Your job is to read a normal English sentence and infer ALL intended robot destinations mentioned in the complete input.
 
-IMPORTANT RULES:
-1. Return ONLY the target name: "red", "blue", or "home" - NO EXTRA WORDS
-2. If user mentions multiple targets, return ALL of them in order
-3. Ignore descriptors like "corner", "box", "left", "right"
-4. Extract just the COLOR or "home"
+CRITICAL: Sequences can repeat. For example:
+- "red then blue then home then blue then home again" means: go to red, go to blue, go home, go to blue AGAIN, go home AGAIN.
+You MUST return ALL five commands in order: [red, blue, home, blue, home]
 
-Examples:
-- "move to red box" → target: "red"
-- "go to blue box in the corner" → target: "blue"  
-- "red box in corner then blue box" → [target: "red", target: "blue"]
-- "move home" → target: "home"
-- "go to red then blue then home" → [target: "red", target: "blue", target: "home"]
+Do not require the user to speak in keywords. Understand phrases like:
+- "move to the red box on the side"
+- "go to blue"
+- "take me home"
+- "send it to the red station"
 
-Return ONLY valid JSON matching this schema exactly:
+Supported destinations are only: red, blue, home.
+
+CRITICAL PARSING RULES:
+1. Parse the ENTIRE input from start to finish. NEVER stop early.
+2. Return ALL destinations mentioned, INCLUDING repeats, in the order they appear.
+3. When you see "then" or "next", there's ANOTHER command coming - keep parsing.
+4. Commands CAN repeat. Red can appear twice, blue twice, or any combination.
+5. Use the meaning of the sentence, not just exact words.
+6. Map red destination to "red", blue to "blue", return/reset to "home".
+7. Ignore filler words like "the", "box", "side", "robot", "please".
+8. EXHAUST the entire input before returning JSON.
+
+Return only valid JSON in this exact shape:
 {
-  "commands": [
-    {"target": "string (red/blue/home only)", "description": "string"}
-  ]
+    "commands": [
+        {
+            "target": "red",
+            "description": "short natural-language summary of the user's intent"
+        }
+    ]
 }
+
+Examples (including repeats):
+- "red" → {"commands":[{"target":"red"}]}
+- "red then blue" → {"commands":[{"target":"red"},{"target":"blue"}]}
+- "red then blue then home" → {"commands":[{"target":"red"},{"target":"blue"},{"target":"home"}]}
+- "red then blue then home then blue" → {"commands":[{"target":"red"},{"target":"blue"},{"target":"home"},{"target":"blue"}]}
+- "red then blue then home then blue then home" → {"commands":[{"target":"red"},{"target":"blue"},{"target":"home"},{"target":"blue"},{"target":"home"}]}
+- "red then blue then home then blue then home again" → {"commands":[{"target":"red"},{"target":"blue"},{"target":"home"},{"target":"blue"},{"target":"home"}]}
+- "move to red, then go to blue, then home, then back to blue, then home again" → {"commands":[{"target":"red"},{"target":"blue"},{"target":"home"},{"target":"blue"},{"target":"home"}]}
+- "blue red home red blue" → {"commands":[{"target":"blue"},{"target":"red"},{"target":"home"},{"target":"red"},{"target":"blue"}]}
 """
 
 
@@ -170,7 +191,7 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
             CURRENT_STATE["active_pin"] = None
             return {
                 "success": True,
-                "message": "🏠 Home position set (all RO outputs OFF) [SIM MODE]",
+                "message": "[HOME] Home position set (all RO outputs OFF) [SIM MODE]",
                 "current_state": CURRENT_STATE.copy(),
             }
         else:
@@ -182,7 +203,7 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
                 CURRENT_STATE["active_pin"] = None
                 return {
                     "success": True,
-                    "message": "🏠 Home position set (all RO outputs OFF)",
+                    "message": "[HOME] Home position set (all RO outputs OFF)",
                     "current_state": CURRENT_STATE.copy(),
                 }
             except Exception as e:
@@ -202,7 +223,7 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
         CURRENT_STATE["active_pin"] = pin
         return {
             "success": True,
-            "message": f"✅ Moving to {description} ({output_type}{pin} ON) [SIM MODE]",
+            "message": f"[OK] Moving to {description} ({output_type}{pin} ON) [SIM MODE]",
             "current_state": CURRENT_STATE.copy(),
         }
     else:
@@ -221,7 +242,7 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
             
             return {
                 "success": True,
-                "message": f"✅ Moving to {description} ({output_type}{pin} ON)",
+                "message": f"[OK] Moving to {description} ({output_type}{pin} ON)",
                 "current_state": CURRENT_STATE.copy(),
             }
         except Exception as e:
@@ -302,7 +323,7 @@ def _process_command(
         print(f"Active output: {CURRENT_STATE['active_output'] or 'None'}")
         return False
 
-    print("🤔 Processing with LLM...")
+    print("[INFO] Processing with LLM...")
     try:
         llm_result = RobotControlLLM.TextCommand(
             model_name=args.model,
@@ -310,6 +331,9 @@ def _process_command(
                 "temperature": args.temperature,
                 "stream": False,
                 "timeout_seconds": args.timeout,
+                "num_predict": 1024,  # Allow longer sequences with multiple commands
+                "top_k": 40,  # Control diversity in generation
+                "top_p": 0.9,  # Nucleus sampling for better quality
             },
             output_json=schema,
             prompt=schema_prompt + f"\nUser input: {user_input}\nOutput:",
@@ -317,12 +341,12 @@ def _process_command(
 
         targets = _parse_llm_response(llm_result)
         if not targets:
-            print("❌ Could not parse any targets from your command.")
+            print("[ERROR] Could not parse any targets from your command.")
             print("Please try: 'move to red box', 'go to blue box', 'move home'")
             print("Or combine: 'red then blue then home'")
             return False
 
-        print(f"\n📍 Parsed {len(targets)} target(s): {', '.join(targets)}")
+        print(f"\n[PARSED] {len(targets)} target(s): {', '.join(targets)}")
         for i, target in enumerate(targets, 1):
             if len(targets) > 1:
                 print(f"\n  Step {i}/{len(targets)}: Moving to {target}")
@@ -331,12 +355,15 @@ def _process_command(
             if not result["success"]:
                 print(f"  Error: {result.get('message', 'Unknown error')}")
                 break
+            # Wait between commands to allow robot to execute
+            if i < len(targets):
+                time.sleep(args.command_delay)
 
     except ConnectionError as exc:
-        print(f"❌ Connection error: {exc}")
+        print(f"[ERROR] Connection error: {exc}")
         print("Hint: Ensure 'ollama serve' is running in another terminal.")
     except Exception as exc:
-        print(f"❌ Error: {exc}")
+        print(f"[ERROR] Error: {exc}")
 
     return False
 
@@ -348,20 +375,21 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="Request timeout seconds")
     parser.add_argument("--simulation", action="store_true", help="Run in simulation mode (no ROS2)")
     parser.add_argument("--voice", action="store_true", help="Enable press-and-hold R voice input")
+    parser.add_argument("--command-delay", type=float, default=2.0, help="Delay in seconds between command executions")
     args = parser.parse_args()
 
     # Initialize ROS2 and I/O client if not in simulation mode
     io_client = None
     if not args.simulation:
         if not ROS2_AVAILABLE:
-            print("❌ ROS2 is not available in this Python environment.")
+            print("[ERROR] ROS2 is not available in this Python environment.")
             if fanuc_import_error is not None:
                 print(f"Import error: {fanuc_import_error}")
             print("Run with --simulation if you do not have a ROS2 FANUC I/O connection.")
             raise SystemExit(1)
 
         if not FANUC_IO_AVAILABLE:
-            print("❌ FANUC I/O client import failed.")
+            print("[ERROR] FANUC I/O client import failed.")
             if fanuc_import_error is not None:
                 print(f"Import error: {fanuc_import_error}")
             print("Ensure the demo folder can import fanuc_io_control and its dependencies.")
@@ -372,18 +400,18 @@ def main() -> None:
             rclpy.init()
             io_client = FanucIOClient()
         except Exception as e:
-            print(f"❌ Could not initialize ROS2 I/O client: {e}")
+            print(f"[ERROR] Could not initialize ROS2 I/O client: {e}")
             print("Ensure ROS2 is running and FANUC I/O services are available.")
             print("Run with --simulation if you want to use the demo without ROS2.")
             raise SystemExit(1)
 
         valid, message = _validate_io_connection(io_client)
         if not valid:
-            print(f"❌ {message}")
+            print(f"[ERROR] {message}")
             print("Ensure the FANUC I/O service is available and reachable before starting the chat.")
             print("Run with --simulation to continue without real hardware.")
             raise SystemExit(1)
-        print(f"✅ {message}")
+        print(f"[OK] {message}")
 
     schema = _build_io_schema()
     schema_prompt = _get_io_schema_prompt()
@@ -415,7 +443,7 @@ def main() -> None:
             import speech_recognition as sr
             from pynput import keyboard
         except ImportError as exc:
-            print("❌ Voice mode requires SpeechRecognition and pynput.")
+            print("[ERROR] Voice mode requires SpeechRecognition and pynput.")
             print("Install with: python3 -m pip install SpeechRecognition pynput")
             raise SystemExit(1)
 
@@ -423,7 +451,7 @@ def main() -> None:
             recognizer = sr.Recognizer()
             microphone = sr.Microphone(sample_rate=16000)
         except Exception as exc:
-            print(f"❌ Could not initialize microphone: {exc}")
+            print(f"[ERROR] Could not initialize microphone: {exc}")
             raise SystemExit(1)
 
         partial_transcript: list[str] = []
