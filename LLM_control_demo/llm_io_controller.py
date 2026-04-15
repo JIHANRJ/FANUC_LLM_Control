@@ -21,6 +21,7 @@ for path in (str(DEMO_ROOT), str(REPO_ROOT)):
         sys.path.insert(0, path)
 
 from llm.robot_control_llm import RobotControlLLM
+from voice import PressToTalkVoiceController
 
 # Import fanuc_io_control only if ROS2 is available
 ROS2_AVAILABLE = False
@@ -375,6 +376,12 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="Request timeout seconds")
     parser.add_argument("--simulation", action="store_true", help="Run in simulation mode (no ROS2)")
     parser.add_argument("--voice", action="store_true", help="Enable press-and-hold R voice input")
+    parser.add_argument(
+        "--voice-engine",
+        choices=["sphinx", "google"],
+        default="sphinx",
+        help="Speech recognition engine to use in voice mode.",
+    )
     parser.add_argument("--command-delay", type=float, default=2.0, help="Delay in seconds between command executions")
     args = parser.parse_args()
 
@@ -433,86 +440,34 @@ def main() -> None:
     print("Type 'status' to see current state, 'exit' to quit.")
     if args.voice:
         print("Press and hold R to record voice, release to send.")
+        print(f"Voice recognition engine: {args.voice_engine}")
     print()
 
-    voice_listener = None
+    voice_controller: PressToTalkVoiceController | None = None
     exit_requested = threading.Event()
 
     if args.voice:
         try:
-            import speech_recognition as sr
-            from pynput import keyboard
-        except ImportError as exc:
-            print("[ERROR] Voice mode requires SpeechRecognition and pynput.")
-            print("Install with: python3 -m pip install SpeechRecognition pynput")
+            voice_controller = PressToTalkVoiceController(
+                engine=args.voice_engine,
+                on_recording_start=lambda: print("\nRecording... release R to send"),
+                on_partial=lambda text: print(f"\nRecognized: {text}"),
+                on_error=lambda err: print(f"\n[voice] {err}"),
+                on_final=lambda text: (
+                    print(f"\nFinal recognized text: {text}"),
+                    exit_requested.set()
+                    if _process_command(text, args, io_client, schema, schema_prompt)
+                    else None,
+                ),
+            )
+            voice_controller.start()
+        except RuntimeError:
+            print("[ERROR] Voice mode requires SpeechRecognition, pynput, PyAudio, and a configured recognizer backend.")
+            print("Install with: python3 -m pip install SpeechRecognition pynput PyAudio pocketsphinx")
             raise SystemExit(1)
-
-        try:
-            recognizer = sr.Recognizer()
-            microphone = sr.Microphone(sample_rate=16000)
         except Exception as exc:
-            print(f"[ERROR] Could not initialize microphone: {exc}")
+            print(f"[ERROR] Could not initialize voice controller: {exc}")
             raise SystemExit(1)
-
-        partial_transcript: list[str] = []
-        recording = False
-        recording_thread: threading.Thread | None = None
-        stop_recording = threading.Event()
-
-        def record_audio() -> None:
-            nonlocal partial_transcript
-            with microphone as source:
-                recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                while recording and not stop_recording.is_set():
-                    try:
-                        audio = recognizer.listen(source, timeout=0.5, phrase_time_limit=3)
-                    except sr.WaitTimeoutError:
-                        continue
-
-                    try:
-                        chunk_text = recognizer.recognize_google(audio)
-                        if chunk_text:
-                            partial_transcript.append(chunk_text)
-                            print(f"\nRecognized: {' '.join(partial_transcript)}")
-                    except sr.UnknownValueError:
-                        continue
-                    except sr.RequestError as exc:
-                        print(f"\n[voice] recognition request failed: {exc}")
-                        break
-
-        def on_press(key):
-            nonlocal recording, recording_thread, partial_transcript
-            try:
-                if key.char == "r" and not recording:
-                    recording = True
-                    partial_transcript = []
-                    stop_recording.clear()
-                    print("\nRecording... release R to send")
-                    recording_thread = threading.Thread(target=record_audio, daemon=True)
-                    recording_thread.start()
-            except AttributeError:
-                pass
-
-        def on_release(key):
-            nonlocal recording, recording_thread
-            try:
-                if key.char == "r" and recording:
-                    recording = False
-                    stop_recording.set()
-                    if recording_thread is not None:
-                        recording_thread.join()
-                    full_text = " ".join(partial_transcript).strip()
-                    if not full_text:
-                        print("\nCould not understand audio")
-                        return
-                    print(f"\nFinal recognized text: {full_text}")
-                    if _process_command(full_text, args, io_client, schema, schema_prompt):
-                        exit_requested.set()
-            except AttributeError:
-                pass
-
-        voice_listener = keyboard.Listener(on_press=on_press, on_release=on_release, suppress=True)
-        voice_listener.start()
 
     try:
         while True:
@@ -529,11 +484,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
     finally:
-        if voice_listener is not None:
-            stop_recording.set()
-            voice_listener.stop()
-            if recording_thread is not None:
-                recording_thread.join(timeout=1)
+        if voice_controller is not None:
+            voice_controller.stop()
 
         if io_client is not None:
             try:

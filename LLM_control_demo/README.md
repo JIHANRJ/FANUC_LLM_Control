@@ -86,6 +86,12 @@ python3 llm_io_controller.py llama3.2:1b --simulation --command-delay 3.0
 # Custom Ollama timeout
 python3 llm_io_controller.py llama3.2:1b --timeout 120
 
+# Voice mode with offline recognizer
+python3 llm_io_controller.py llama3.2:1b --simulation --voice --voice-engine sphinx
+
+# Voice mode with Google recognizer
+python3 llm_io_controller.py llama3.2:1b --simulation --voice --voice-engine google
+
 # Full usage help
 python3 llm_io_controller.py --help
 ```

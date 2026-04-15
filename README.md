@@ -61,6 +61,17 @@ No dispatcher/skills layer is required for this version.
 
 ## Run Modes
 
+### Mode 0: Voice Capture Only (No LLM/Robot)
+
+Use this to iterate on microphone quality and speech recognition independently.
+
+```bash
+source .venv/bin/activate
+./.venv/bin/python pit/test_voice_capture.py --engine sphinx
+```
+
+Press and hold `R` to record, release to transcribe. Say or type `exit` to quit.
+
 ### Mode 1: Local Simulator (No VM Required)
 
 Use this to test the LLM parsing and action framework locally without a VM.
