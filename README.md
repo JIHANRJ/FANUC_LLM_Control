@@ -193,7 +193,7 @@ source ~/.zshrc
 
 ### Ollama Configuration
 
-- `OLLAMA_API_URL` default: `http://127.0.0.1:11435/api/generate`
+- `OLLAMA_API_URL` default: `http://127.0.0.1:11434/api/generate`
 
 If Ollama is on a different machine or port:
 

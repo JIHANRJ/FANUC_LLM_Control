@@ -1,8 +1,37 @@
 import sys
-import rclpy
-from rclpy.node import Node
-from fanuc_msgs.srv import GetBoolIO, SetBoolIO
-from fanuc_msgs.msg import IOType
+from typing import Optional
+
+try:
+    import rclpy
+    from rclpy.node import Node
+    from fanuc_msgs.srv import GetBoolIO, SetBoolIO
+    from fanuc_msgs.msg import IOType
+    IMPORT_ERROR: Optional[BaseException] = None
+except ImportError as exc:
+    rclpy = None
+    Node = object
+    GetBoolIO = None
+    SetBoolIO = None
+    IOType = None
+    IMPORT_ERROR = exc
+
+
+VALID_IO_TYPES = {"DI", "DO", "RI", "RO"}
+
+
+def _normalize_io_type(io_type: str) -> str:
+    normalized = io_type.strip().upper()
+    if normalized not in VALID_IO_TYPES:
+        raise ValueError(f"Unsupported I/O type {io_type!r}. Expected one of: {', '.join(sorted(VALID_IO_TYPES))}")
+    return normalized
+
+
+def _require_ros_dependencies() -> None:
+    if IMPORT_ERROR is not None:
+        raise SystemExit(
+            "ROS 2 FANUC I/O dependencies are not available. "
+            "Source the ROS 2 workspace that provides fanuc_msgs and rclpy before running this script."
+        ) from IMPORT_ERROR
 
 class FanucIOClient(Node):
     """
@@ -15,11 +44,14 @@ class FanucIOClient(Node):
         self.set_client = self.create_client(SetBoolIO, '/fanuc_gpio_controller/set_bool_io')
 
         self.get_logger().info('Waiting for FANUC I/O services to become available...')
-        self.get_client.wait_for_service()
-        self.set_client.wait_for_service()
+        while not self.get_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info('Still waiting for /fanuc_gpio_controller/get_bool_io...')
+        while not self.set_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().info('Still waiting for /fanuc_gpio_controller/set_bool_io...')
         self.get_logger().info('Successfully connected to FANUC I/O services.')
 
     def read_io(self, io_type: str, index: int) -> bool:
+        io_type = _normalize_io_type(io_type)
         req = GetBoolIO.Request()
         req.io_type = IOType(type=io_type.upper())
         req.index = index
@@ -36,6 +68,7 @@ class FanucIOClient(Node):
             return None
 
     def write_io(self, io_type: str, index: int, value: bool) -> bool:
+        io_type = _normalize_io_type(io_type)
         req = SetBoolIO.Request()
         req.io_type = IOType(type=io_type.upper())
         req.index = index
@@ -54,6 +87,7 @@ class FanucIOClient(Node):
 
 
 def main(args=None):
+    _require_ros_dependencies()
     rclpy.init(args=args)
     
     print("\n--- Starting FANUC I/O Monitor ---")
