@@ -16,6 +16,7 @@ class PressToTalkVoiceController:
         self,
         *,
         trigger_key: str = "r",
+        always_listen: bool = False,
         engine: VoiceEngine = "whisper",
         sample_rate: int = 16000,
         phrase_time_limit: float = 3.0,
@@ -49,6 +50,7 @@ class PressToTalkVoiceController:
         self._keyboard = keyboard
 
         self._trigger_key = trigger_key.lower()
+        self._always_listen = always_listen
         self._engine = engine
         self._suppress_keyboard = suppress_keyboard
         self._whisper_beam_size = whisper_beam_size
@@ -69,6 +71,7 @@ class PressToTalkVoiceController:
         self._partial_transcript: list[str] = []
         self._recording = False
         self._recording_thread: threading.Thread | None = None
+        self._continuous_thread: threading.Thread | None = None
         self._stop_recording = threading.Event()
         self._listener = None
 
@@ -93,6 +96,15 @@ class PressToTalkVoiceController:
         return self._engine
 
     def start(self) -> None:
+        if self._always_listen:
+            if self._continuous_thread is not None:
+                return
+
+            self._stop_recording.clear()
+            self._continuous_thread = threading.Thread(target=self._continuous_listen_loop, daemon=True)
+            self._continuous_thread.start()
+            return
+
         if self._listener is not None:
             return
 
@@ -110,6 +122,10 @@ class PressToTalkVoiceController:
         if self._recording_thread is not None:
             self._recording_thread.join(timeout=1)
             self._recording_thread = None
+
+        if self._continuous_thread is not None:
+            self._continuous_thread.join(timeout=1)
+            self._continuous_thread = None
 
         if self._listener is not None:
             self._listener.stop()
@@ -208,3 +224,39 @@ class PressToTalkVoiceController:
 
         if self._on_final is not None:
             self._on_final(full_text)
+
+    def _continuous_listen_loop(self) -> None:
+        with self._microphone as source:
+            self._recognizer.adjust_for_ambient_noise(
+                source,
+                duration=self._ambient_noise_duration,
+            )
+
+            while not self._stop_recording.is_set():
+                try:
+                    audio = self._recognizer.listen(
+                        source,
+                        timeout=self._listen_timeout,
+                        phrase_time_limit=self._phrase_time_limit,
+                    )
+                except self._sr.WaitTimeoutError:
+                    continue
+                except Exception as exc:
+                    if self._on_error is not None:
+                        self._on_error(str(exc))
+                    continue
+
+                try:
+                    text = self._recognize_chunk(audio)
+                    if not text:
+                        continue
+                    if self._on_final is not None:
+                        self._on_final(text)
+                except self._sr.UnknownValueError:
+                    continue
+                except self._sr.RequestError as exc:
+                    if self._on_error is not None:
+                        self._on_error(str(exc))
+                except Exception as exc:
+                    if self._on_error is not None:
+                        self._on_error(str(exc))

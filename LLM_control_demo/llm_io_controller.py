@@ -418,6 +418,18 @@ def main() -> None:
         default="sphinx",
         help="Speech recognition engine to use in voice mode.",
     )
+    parser.add_argument("--wake-word", default="crx", help="Wake word required at the start of voice commands (set empty string to disable).")
+    parser.add_argument(
+        "--wake-wait-seconds",
+        type=float,
+        default=2.5,
+        help="Seconds to keep listening for command text after wake word (extends as speech continues).",
+    )
+    parser.add_argument(
+        "--push-to-talk",
+        action="store_true",
+        help="Use press-and-hold trigger key mode instead of always-listening wake-word mode.",
+    )
     parser.add_argument("--voice-trigger-key", default="r", help="Press-and-hold key used to record audio in voice mode.")
     parser.add_argument(
         "--whisper-model",
@@ -502,8 +514,18 @@ def main() -> None:
     print("-" * 70)
     print("Type 'status' to see current state, 'exit' to quit.")
     if args.voice:
-        print(f"Press and hold {args.voice_trigger_key.upper()} to record voice, release to send.")
+        if args.push_to_talk:
+            print(f"Press and hold {args.voice_trigger_key.upper()} to record voice, release to send.")
+        else:
+            print("Hands-free voice mode enabled.")
+            if args.wake_word.strip():
+                print(f"Say '{args.wake_word}' followed by your command.")
+                print(f"Post-wake command window: {args.wake_wait_seconds:.1f}s")
         print(f"Voice recognition engine: {args.voice_engine}")
+        if args.wake_word.strip():
+            print(f"Wake word required: {args.wake_word}")
+        else:
+            print("Wake word disabled")
         if args.voice_engine == "whisper":
             language = "auto" if args.whisper_language.lower() == "auto" else args.whisper_language
             print(
@@ -515,11 +537,125 @@ def main() -> None:
 
     voice_controller: PressToTalkVoiceController | None = None
     exit_requested = threading.Event()
+    configured_wake_word = args.wake_word.strip().lower()
+    wake_lock = threading.Lock()
+    wake_active = False
+    wake_deadline = 0.0
+    wake_buffer = ""
+
+    def _extract_voice_command(text: str) -> Optional[str]:
+        spoken = text.strip()
+        if not spoken:
+            return None
+
+        # Apply wake-word gating only when configured.
+        if not configured_wake_word:
+            return spoken
+
+        lowered = spoken.lower().strip()
+        if not lowered.startswith(configured_wake_word):
+            print(
+                f"[voice] Ignored. Start with wake word '{args.wake_word}' "
+                    "(example: 'crx move to red then blue')."
+            )
+            return None
+
+        remainder = spoken[len(configured_wake_word):].lstrip(" ,:;.-")
+        if not remainder:
+            print("[voice] Wake word heard, but no command followed it.")
+            return None
+
+        return remainder
+
+    def _append_running_text(existing: str, chunk: str) -> str:
+        if not existing:
+            return chunk.strip()
+        if not chunk:
+            return existing
+        return f"{existing} {chunk.strip()}".strip()
+
+    def _finalize_wake_command() -> None:
+        nonlocal wake_active, wake_deadline, wake_buffer
+        with wake_lock:
+            command_text = wake_buffer.strip()
+            wake_active = False
+            wake_deadline = 0.0
+            wake_buffer = ""
+
+        if not command_text:
+            print("[voice] Wake word heard, but no command captured.")
+            return
+
+        print(f"[voice] Executing: {command_text}")
+        if _process_command(command_text, args, io_client, schema, schema_prompt):
+            exit_requested.set()
+
+    def _wake_monitor_loop() -> None:
+        nonlocal wake_active, wake_deadline
+        while not exit_requested.is_set():
+            should_finalize = False
+            with wake_lock:
+                should_finalize = wake_active and wake_deadline > 0.0 and time.time() >= wake_deadline
+            if should_finalize:
+                _finalize_wake_command()
+            time.sleep(0.1)
+
+    wake_monitor_thread: threading.Thread | None = None
+
+    def _on_voice_final(text: str) -> None:
+        nonlocal wake_active, wake_deadline, wake_buffer
+        print(f"\nFinal recognized text: {text}")
+
+        # Push-to-talk uses single-shot processing.
+        if args.push_to_talk:
+            command_text = _extract_voice_command(text)
+            if command_text is None:
+                return
+
+            if command_text != text:
+                print(f"[voice] Wake word accepted. Command: {command_text}")
+
+            if _process_command(command_text, args, io_client, schema, schema_prompt):
+                exit_requested.set()
+            return
+
+        # Hands-free mode: wake word arms a timed command-capture window.
+        spoken = text.strip()
+        if not spoken:
+            return
+
+        lowered = spoken.lower().strip()
+
+        if not configured_wake_word:
+            print(f"[voice] Live command: {spoken}")
+            if _process_command(spoken, args, io_client, schema, schema_prompt):
+                exit_requested.set()
+            return
+
+        with wake_lock:
+            if lowered.startswith(configured_wake_word):
+                remainder = spoken[len(configured_wake_word):].lstrip(" ,:;.-")
+                wake_active = True
+                wake_deadline = time.time() + max(0.5, args.wake_wait_seconds)
+                wake_buffer = remainder.strip()
+                print("[voice] Wake word detected. Listening for command...")
+                if wake_buffer:
+                    print(f"[voice][live] {wake_buffer}")
+                return
+
+            if wake_active:
+                wake_buffer = _append_running_text(wake_buffer, spoken)
+                wake_deadline = time.time() + max(0.5, args.wake_wait_seconds)
+                print(f"[voice][live] {wake_buffer}")
+                return
+
+        print(f"[voice] Ignored (waiting for wake word '{args.wake_word}').")
 
     if args.voice:
         try:
             voice_controller = PressToTalkVoiceController(
                 trigger_key=args.voice_trigger_key,
+                always_listen=not args.push_to_talk,
                 engine=args.voice_engine,
                 whisper_model_size=args.whisper_model,
                 whisper_compute_type=args.whisper_compute_type,
@@ -531,14 +667,12 @@ def main() -> None:
                 ),
                 on_partial=lambda text: print(f"\nRecognized: {text}"),
                 on_error=lambda err: print(f"\n[voice] {err}"),
-                on_final=lambda text: (
-                    print(f"\nFinal recognized text: {text}"),
-                    exit_requested.set()
-                    if _process_command(text, args, io_client, schema, schema_prompt)
-                    else None,
-                ),
+                on_final=_on_voice_final,
             )
             voice_controller.start()
+            if not args.push_to_talk:
+                wake_monitor_thread = threading.Thread(target=_wake_monitor_loop, daemon=True)
+                wake_monitor_thread.start()
         except RuntimeError:
             print("[ERROR] Voice mode dependencies are missing for the selected engine.")
             if args.voice_engine == "whisper":
@@ -567,6 +701,10 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
     finally:
+        exit_requested.set()
+        if wake_monitor_thread is not None:
+            wake_monitor_thread.join(timeout=1)
+
         if voice_controller is not None:
             voice_controller.stop()
 
