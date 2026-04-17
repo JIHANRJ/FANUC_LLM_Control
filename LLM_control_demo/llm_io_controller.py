@@ -47,7 +47,7 @@ if ROS2_AVAILABLE:
 BOX_CONFIG = {
     "red": {"output": "RO", "pin": 1, "description": "Red Box"},
     "blue": {"output": "RO", "pin": 2, "description": "Blue Box"},
-    "home": {"output": None, "pin": None, "description": "Home Position (all RO off)"},
+    "home": {"output": None, "pin": None, "description": "Home Position (RO1 OFF, RO2 OFF)"},
 }
 
 # Track current state
@@ -183,8 +183,28 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
         }
     
     config = BOX_CONFIG[target_key]
+
+    def _write_with_retry(io_name: str, io_pin: int, desired_value: bool) -> bool:
+        """Write a single IO and retry on transient failures.
+
+        Some FANUC setups acknowledge writes but do not immediately mirror state in readback,
+        so write acknowledgment is treated as success while readback is best-effort only.
+        """
+        for _ in range(3):
+            if not io_client.write_io(io_name, io_pin, desired_value):
+                time.sleep(0.2)
+                continue
+            # Best-effort readback; ignore mismatch for reliability on controllers
+            # that do not expose immediate state reflection via get_bool_io.
+            try:
+                io_client.read_io(io_name, io_pin)
+            except Exception:
+                pass
+            return True
+
+        return False
     
-    # Home position: turn off all RO outputs
+    # Home position: force both RO outputs OFF.
     if target_key == "home":
         if not ROS2_AVAILABLE or io_client is None:
             # Simulation mode
@@ -192,19 +212,28 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
             CURRENT_STATE["active_pin"] = None
             return {
                 "success": True,
-                "message": "[HOME] Home position set (all RO outputs OFF) [SIM MODE]",
+                "message": "[HOME] Home position requested (RO1 OFF, RO2 OFF) [SIM MODE]",
                 "current_state": CURRENT_STATE.copy(),
             }
         else:
-            # Real mode - turn off both RO1 and RO2
             try:
-                io_client.write_io("RO", 1, False)
-                io_client.write_io("RO", 2, False)
+                if not _write_with_retry("RO", 1, False):
+                    return {
+                        "success": False,
+                        "message": "Failed to turn off RO1 for home position after retries.",
+                    }
+
+                if not _write_with_retry("RO", 2, False):
+                    return {
+                        "success": False,
+                        "message": "Failed to turn off RO2 for home position after retries.",
+                    }
+
                 CURRENT_STATE["active_output"] = None
                 CURRENT_STATE["active_pin"] = None
                 return {
                     "success": True,
-                    "message": "[HOME] Home position set (all RO outputs OFF)",
+                    "message": "[HOME] Home position requested (RO1 OFF, RO2 OFF)",
                     "current_state": CURRENT_STATE.copy(),
                 }
             except Exception as e:
@@ -228,22 +257,29 @@ def _execute_io_command(target: str, io_client: Optional[FanucIOClient] = None) 
             "current_state": CURRENT_STATE.copy(),
         }
     else:
-        # Real mode - turn off previous output, turn on new output
+        # Real mode - RO1 and RO2 are exclusive states:
+        # red = RO1 ON, RO2 OFF; blue = RO2 ON, RO1 OFF.
         try:
-            # Turn off all other RO pins first (ensure only one is active)
-            for key, cfg in BOX_CONFIG.items():
-                if key != "home" and cfg["pin"] is not None and cfg["pin"] != pin:
-                    io_client.write_io("RO", cfg["pin"], False)
-            
-            # Turn on the target output
-            io_client.write_io(output_type, pin, True)
+            other_pin = 2 if pin == 1 else 1
+
+            if not _write_with_retry(output_type, other_pin, False):
+                return {
+                    "success": False,
+                    "message": f"Failed to turn off {output_type}{other_pin} before activating {description}.",
+                }
+
+            if not _write_with_retry(output_type, pin, True):
+                return {
+                    "success": False,
+                    "message": f"Failed to activate {description} ({output_type}{pin}) after retries.",
+                }
             
             CURRENT_STATE["active_output"] = f"{output_type}{pin}"
             CURRENT_STATE["active_pin"] = pin
             
             return {
                 "success": True,
-                "message": f"[OK] Moving to {description} ({output_type}{pin} ON)",
+                "message": f"[OK] {description} command sent ({output_type}{pin} ON request, other RO OFF request)",
                 "current_state": CURRENT_STATE.copy(),
             }
         except Exception as e:
@@ -378,9 +414,36 @@ def main() -> None:
     parser.add_argument("--voice", action="store_true", help="Enable press-and-hold R voice input")
     parser.add_argument(
         "--voice-engine",
-        choices=["sphinx", "google"],
+        choices=["whisper", "sphinx", "google"],
         default="sphinx",
         help="Speech recognition engine to use in voice mode.",
+    )
+    parser.add_argument("--voice-trigger-key", default="r", help="Press-and-hold key used to record audio in voice mode.")
+    parser.add_argument(
+        "--whisper-model",
+        default="small",
+        help="Whisper model size (tiny, base, small, medium, large-v3, etc.).",
+    )
+    parser.add_argument(
+        "--whisper-compute-type",
+        default="int8",
+        help="Whisper compute type (int8, float16, float32).",
+    )
+    parser.add_argument(
+        "--whisper-device",
+        default="cpu",
+        help="Whisper device (cpu or cuda).",
+    )
+    parser.add_argument(
+        "--whisper-language",
+        default="en",
+        help="Language hint for Whisper (set to auto for no hint).",
+    )
+    parser.add_argument(
+        "--whisper-beam-size",
+        type=int,
+        default=3,
+        help="Beam size for faster-whisper decoding.",
     )
     parser.add_argument("--command-delay", type=float, default=2.0, help="Delay in seconds between command executions")
     args = parser.parse_args()
@@ -439,8 +502,15 @@ def main() -> None:
     print("-" * 70)
     print("Type 'status' to see current state, 'exit' to quit.")
     if args.voice:
-        print("Press and hold R to record voice, release to send.")
+        print(f"Press and hold {args.voice_trigger_key.upper()} to record voice, release to send.")
         print(f"Voice recognition engine: {args.voice_engine}")
+        if args.voice_engine == "whisper":
+            language = "auto" if args.whisper_language.lower() == "auto" else args.whisper_language
+            print(
+                "Whisper settings: "
+                f"model={args.whisper_model}, device={args.whisper_device}, "
+                f"compute={args.whisper_compute_type}, language={language}, beam={args.whisper_beam_size}"
+            )
     print()
 
     voice_controller: PressToTalkVoiceController | None = None
@@ -449,8 +519,16 @@ def main() -> None:
     if args.voice:
         try:
             voice_controller = PressToTalkVoiceController(
+                trigger_key=args.voice_trigger_key,
                 engine=args.voice_engine,
-                on_recording_start=lambda: print("\nRecording... release R to send"),
+                whisper_model_size=args.whisper_model,
+                whisper_compute_type=args.whisper_compute_type,
+                whisper_device=args.whisper_device,
+                whisper_beam_size=args.whisper_beam_size,
+                whisper_language=None if args.whisper_language.lower() == "auto" else args.whisper_language,
+                on_recording_start=lambda: print(
+                    f"\nRecording... release {args.voice_trigger_key.upper()} to send"
+                ),
                 on_partial=lambda text: print(f"\nRecognized: {text}"),
                 on_error=lambda err: print(f"\n[voice] {err}"),
                 on_final=lambda text: (
@@ -462,8 +540,13 @@ def main() -> None:
             )
             voice_controller.start()
         except RuntimeError:
-            print("[ERROR] Voice mode requires SpeechRecognition, pynput, PyAudio, and a configured recognizer backend.")
-            print("Install with: python3 -m pip install SpeechRecognition pynput PyAudio pocketsphinx")
+            print("[ERROR] Voice mode dependencies are missing for the selected engine.")
+            if args.voice_engine == "whisper":
+                print("Install with: python3 -m pip install SpeechRecognition pynput PyAudio faster-whisper requests")
+            elif args.voice_engine == "sphinx":
+                print("Install with: python3 -m pip install SpeechRecognition pynput PyAudio pocketsphinx")
+            else:
+                print("Install with: python3 -m pip install SpeechRecognition pynput PyAudio")
             raise SystemExit(1)
         except Exception as exc:
             print(f"[ERROR] Could not initialize voice controller: {exc}")

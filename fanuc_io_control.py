@@ -8,12 +8,11 @@ try:
     from fanuc_msgs.msg import IOType
     IMPORT_ERROR: Optional[BaseException] = None
 except ImportError as exc:
-    rclpy = None
-    Node = object
-    GetBoolIO = None
-    SetBoolIO = None
-    IOType = None
     IMPORT_ERROR = exc
+    raise ImportError(
+        "ROS 2 FANUC I/O dependencies are not available. "
+        "Source the workspace that provides rclpy and fanuc_msgs before importing fanuc_io_control."
+    ) from exc
 
 
 VALID_IO_TYPES = {"DI", "DO", "RI", "RO"}
