@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import shlex
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from urllib.parse import urlparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -90,7 +93,7 @@ CURRENT_STATE = {
     "last_updated": None,
 }
 
-BUILD_VERSION = "2026-04-23-voice-reply-v1"
+BUILD_VERSION = "2026-04-23-telemetry-v1"
 
 VOICE_LABEL_BY_KEY = {
     "nuttiess_choclae": "Nuttiess Choclae",
@@ -106,6 +109,86 @@ VOICE_LABEL_BY_KEY = {
     "ponds": "Ponds",
     "dove": "Dove soap",
 }
+
+TELEMETRY_HEADERS = [
+    "timestamp_utc",
+    "session_id",
+    "command_id",
+    "model_parser",
+    "model_dialogue",
+    "voice_engine",
+    "wake_word",
+    "raw_recognized_text",
+    "spoken_text",
+    "spoken_text_chars",
+    "spoken_text_words",
+    "reply_text",
+    "reply_chars",
+    "reply_words",
+    "intent",
+    "items_count",
+    "success",
+    "recording_start_ts",
+    "first_chunk_ts",
+    "wake_accept_ts",
+    "execute_start_ts",
+    "parse_start_ts",
+    "parse_end_ts",
+    "parse_ms",
+    "llm_parse_ms",
+    "local_parse_ms",
+    "execute_end_ts",
+    "execute_ms",
+    "reply_start_ts",
+    "reply_end_ts",
+    "reply_ms",
+    "dialogue_llm_ms",
+    "total_recording_to_execute_ms",
+    "total_recording_to_reply_ms",
+]
+
+
+def _default_telemetry_csv_path() -> Path:
+    return MODULE_ROOT / "logs" / "voice_metrics.csv"
+
+
+def _ensure_telemetry_csv(csv_path: Path) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    if csv_path.exists() and csv_path.stat().st_size > 0:
+        try:
+            with csv_path.open("r", encoding="utf-8") as handle:
+                first_line = handle.readline().strip()
+            expected_header = ",".join(TELEMETRY_HEADERS)
+            if first_line == expected_header:
+                return
+            backup_path = csv_path.with_suffix(csv_path.suffix + f".schema_backup_{int(time.time())}")
+            csv_path.rename(backup_path)
+            print(f"[telemetry] Existing CSV schema changed, rotated old log to: {backup_path}")
+        except Exception as exc:
+            print(f"[WARN] Could not validate telemetry schema, recreating file: {exc}")
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TELEMETRY_HEADERS)
+        writer.writeheader()
+
+
+def _append_telemetry_row(csv_path: Path, row: dict[str, object]) -> None:
+    with csv_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TELEMETRY_HEADERS)
+        writer.writerow({key: row.get(key, "") for key in TELEMETRY_HEADERS})
+
+
+def _elapsed_ms(start_ts: Optional[float], end_ts: Optional[float]) -> Optional[float]:
+    if start_ts is None or end_ts is None:
+        return None
+    return round(max(0.0, (end_ts - start_ts) * 1000.0), 3)
+
+
+def _word_count(text: str) -> int:
+    return len([part for part in text.strip().split() if part])
+
+
+def _dialogue_model_name(args: argparse.Namespace) -> str:
+    return args.dialogue_model.strip() or args.model
 
 
 class RegisterBackend:
@@ -659,7 +742,7 @@ def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: Re
     }
 
 
-def _validate_robot_signals(io_client: Optional[FanucIOClient]) -> None:
+def _validate_robot_signals(io_client: Optional[object]) -> None:
     if io_client is None:
         return
 
@@ -693,7 +776,7 @@ def _spoken_list(items: list[tuple[str, int]]) -> str:
     return ", ".join(parts[:-1]) + f", and {parts[-1]}"
 
 
-def _build_crx_reply(intent: str, items: list[tuple[str, int]], result: dict) -> str:
+def _build_crx_reply_template(intent: str, items: list[tuple[str, int]], result: dict) -> str:
     if not result.get("success"):
         return "I didn't quite catch that, but I'm here to help. Could you say it one more time?"
 
@@ -742,14 +825,83 @@ def _build_crx_reply(intent: str, items: list[tuple[str, int]], result: dict) ->
     return f"Lovely choice. I'll fetch {_spoken_list(items)} for you right now."
 
 
+def _build_crx_reply(
+    intent: str,
+    items: list[tuple[str, int]],
+    result: dict,
+    args: argparse.Namespace,
+    user_input: str,
+) -> tuple[str, Optional[float]]:
+    if args.no_dialogue_llm:
+        return _build_crx_reply_template(intent, items, result), None
+
+    try:
+        state = result.get("state", {}) if isinstance(result.get("state", {}), dict) else {}
+        dialogue_context = {
+            "user_input": user_input,
+            "intent": intent,
+            "items": [
+                {
+                    "item": VOICE_LABEL_BY_KEY.get(item_key, item_key),
+                    "quantity": qty,
+                }
+                for item_key, qty in items
+            ],
+            "success": bool(result.get("success", False)),
+            "message": str(result.get("message", "")),
+            "order_total": sum(int(v or 0) for v in state.values()) if state else 0,
+            "non_zero_order_items": [
+                {
+                    "item": VOICE_LABEL_BY_KEY.get(product.key, product.description),
+                    "quantity": int(state.get(product.key, 0) or 0),
+                }
+                for product in PRODUCTS
+                if int(state.get(product.key, 0) or 0) > 0
+            ],
+            "available_products": [VOICE_LABEL_BY_KEY.get(product.key, product.description) for product in PRODUCTS],
+        }
+
+        dialogue_result = RobotControlLLM.DialogueResponse(
+            model_name=_dialogue_model_name(args),
+            model_parameters={
+                "temperature": args.dialogue_temperature,
+                "stream": False,
+                "timeout_seconds": args.dialogue_timeout,
+                "num_predict": args.dialogue_max_tokens,
+                "top_k": 40,
+                "top_p": 0.92,
+            },
+            context=dialogue_context,
+        )
+        reply_text = str(dialogue_result.get("response", "")).strip()
+        if reply_text:
+            return reply_text, float(dialogue_result.get("elapsed_ms", 0.0))
+    except Exception:
+        pass
+
+    return _build_crx_reply_template(intent, items, result), None
+
+
 def _finalize_and_respond(
     *,
     intent: str,
     items: list[tuple[str, int]],
     backend: RegisterBackend,
-    io_client: Optional[FanucIOClient],
+    io_client: Optional[object],
+    args: argparse.Namespace,
+    user_input: str,
+    telemetry_ctx: Optional[dict[str, object]] = None,
 ) -> None:
+    execute_start_ts = time.monotonic()
+    if telemetry_ctx is not None:
+        telemetry_ctx["execute_start_ts"] = execute_start_ts
+
     result = _execute_order_update(intent, items, backend)
+    execute_end_ts = time.monotonic()
+    if telemetry_ctx is not None:
+        telemetry_ctx["execute_end_ts"] = execute_end_ts
+        telemetry_ctx["execute_ms"] = _elapsed_ms(execute_start_ts, execute_end_ts)
+
     print(result["message"])
     if result.get("state"):
         _print_state_table(result["state"])
@@ -758,8 +910,71 @@ def _finalize_and_respond(
         CURRENT_STATE["last_items"] = items
         CURRENT_STATE["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    print(f"CRX> {_build_crx_reply(intent, items, result)}")
+    reply_start_ts = time.monotonic()
+    reply_text, dialogue_llm_ms = _build_crx_reply(intent, items, result, args, user_input)
+    reply_end_ts = time.monotonic()
+    print(f"CRX> {reply_text}")
     _validate_robot_signals(io_client)
+
+    if telemetry_ctx is None:
+        return
+
+    telemetry_ctx["reply_start_ts"] = reply_start_ts
+    telemetry_ctx["reply_end_ts"] = reply_end_ts
+    telemetry_ctx["reply_ms"] = _elapsed_ms(reply_start_ts, reply_end_ts)
+    telemetry_ctx["intent"] = intent
+    telemetry_ctx["items_count"] = len(items)
+    telemetry_ctx["success"] = bool(result.get("success", False))
+    telemetry_ctx["reply_text"] = reply_text
+    telemetry_ctx["dialogue_llm_ms"] = dialogue_llm_ms if dialogue_llm_ms is not None else ""
+
+    spoken_text = str(telemetry_ctx.get("spoken_text", ""))
+    recording_start_ts = telemetry_ctx.get("recording_start_ts")
+    if not isinstance(recording_start_ts, (int, float)):
+        recording_start_ts = None
+
+    row = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "session_id": telemetry_ctx.get("session_id", ""),
+        "command_id": telemetry_ctx.get("command_id", ""),
+        "model_parser": args.model,
+        "model_dialogue": _dialogue_model_name(args) if not args.no_dialogue_llm else "template_fallback",
+        "voice_engine": args.voice_engine if args.voice else "text",
+        "wake_word": args.wake_word if args.voice else "",
+        "raw_recognized_text": telemetry_ctx.get("raw_recognized_text", ""),
+        "spoken_text": spoken_text,
+        "spoken_text_chars": len(spoken_text),
+        "spoken_text_words": _word_count(spoken_text),
+        "reply_text": reply_text,
+        "reply_chars": len(reply_text),
+        "reply_words": _word_count(reply_text),
+        "intent": telemetry_ctx.get("intent", ""),
+        "items_count": telemetry_ctx.get("items_count", 0),
+        "success": telemetry_ctx.get("success", False),
+        "recording_start_ts": telemetry_ctx.get("recording_start_ts", ""),
+        "first_chunk_ts": telemetry_ctx.get("first_chunk_ts", ""),
+        "wake_accept_ts": telemetry_ctx.get("wake_accept_ts", ""),
+        "execute_start_ts": telemetry_ctx.get("execute_start_ts", ""),
+        "parse_start_ts": telemetry_ctx.get("parse_start_ts", ""),
+        "parse_end_ts": telemetry_ctx.get("parse_end_ts", ""),
+        "parse_ms": telemetry_ctx.get("parse_ms", ""),
+        "llm_parse_ms": telemetry_ctx.get("llm_parse_ms", ""),
+        "local_parse_ms": telemetry_ctx.get("local_parse_ms", ""),
+        "execute_end_ts": telemetry_ctx.get("execute_end_ts", ""),
+        "execute_ms": telemetry_ctx.get("execute_ms", ""),
+        "reply_start_ts": telemetry_ctx.get("reply_start_ts", ""),
+        "reply_end_ts": telemetry_ctx.get("reply_end_ts", ""),
+        "reply_ms": telemetry_ctx.get("reply_ms", ""),
+        "dialogue_llm_ms": telemetry_ctx.get("dialogue_llm_ms", ""),
+        "total_recording_to_execute_ms": _elapsed_ms(recording_start_ts, execute_end_ts),
+        "total_recording_to_reply_ms": _elapsed_ms(recording_start_ts, reply_end_ts),
+    }
+
+    try:
+        if args.telemetry_enabled:
+            _append_telemetry_row(Path(args.telemetry_csv), row)
+    except Exception as exc:
+        print(f"[WARN] Telemetry logging failed: {exc}")
 
 
 def _print_state_table(state: dict[str, int]) -> None:
@@ -773,9 +988,10 @@ def _process_command(
     user_input: str,
     args: argparse.Namespace,
     backend: RegisterBackend,
-    io_client: Optional[FanucIOClient],
+    io_client: Optional[object],
     schema: dict,
     schema_prompt: str,
+    telemetry_ctx: Optional[dict[str, object]] = None,
 ) -> bool:
     if not user_input:
         return False
@@ -857,23 +1073,38 @@ def _process_command(
             items=[],
             backend=backend,
             io_client=io_client,
+            args=args,
+            user_input=user_input,
+            telemetry_ctx=telemetry_ctx,
         )
         return False
 
     # Deterministic local parse first for phrases like "3 nivea and 4 nutties".
     local_intent = _derive_intent_from_text(user_input)
+    local_parse_start = time.monotonic()
     local_items = _extract_items_from_text(user_input)
+    local_parse_end = time.monotonic()
+    if telemetry_ctx is not None:
+        telemetry_ctx["local_parse_ms"] = _elapsed_ms(local_parse_start, local_parse_end)
     if local_intent in {"status", "clear_order", "product_list"} or local_items:
         print(f"[PARSED:LOCAL] intent={local_intent}, items={local_items}")
+        if telemetry_ctx is not None:
+            telemetry_ctx["parse_start_ts"] = local_parse_start
+            telemetry_ctx["parse_end_ts"] = local_parse_end
+            telemetry_ctx["parse_ms"] = _elapsed_ms(local_parse_start, local_parse_end)
         _finalize_and_respond(
             intent=local_intent,
             items=local_items,
             backend=backend,
             io_client=io_client,
+            args=args,
+            user_input=user_input,
+            telemetry_ctx=telemetry_ctx,
         )
         return False
 
     try:
+        llm_parse_start = time.monotonic()
         llm_result = RobotControlLLM.TextCommand(
             model_name=args.model,
             model_parameters={
@@ -887,14 +1118,23 @@ def _process_command(
             output_json=schema,
             prompt=schema_prompt + f"\nUser input: {user_input}\nOutput:",
         )
+        llm_parse_end = time.monotonic()
 
         intent, items = _parse_llm_output(llm_result, user_input)
         print(f"[PARSED] intent={intent}, items={items}")
+        if telemetry_ctx is not None:
+            telemetry_ctx["parse_start_ts"] = llm_parse_start
+            telemetry_ctx["parse_end_ts"] = llm_parse_end
+            telemetry_ctx["parse_ms"] = _elapsed_ms(llm_parse_start, llm_parse_end)
+            telemetry_ctx["llm_parse_ms"] = _elapsed_ms(llm_parse_start, llm_parse_end)
         _finalize_and_respond(
             intent=intent,
             items=items,
             backend=backend,
             io_client=io_client,
+            args=args,
+            user_input=user_input,
+            telemetry_ctx=telemetry_ctx,
         )
 
     except ConnectionError as exc:
@@ -958,8 +1198,24 @@ def main() -> None:
     parser.add_argument("--whisper-device", default="cpu")
     parser.add_argument("--whisper-language", default="en")
     parser.add_argument("--whisper-beam-size", type=int, default=3)
+    parser.add_argument("--dialogue-model", default="", help="Optional model for conversational CRX replies (defaults to parser model)")
+    parser.add_argument("--dialogue-temperature", type=float, default=0.7)
+    parser.add_argument("--dialogue-timeout", type=float, default=8.0)
+    parser.add_argument("--dialogue-max-tokens", type=int, default=120)
+    parser.add_argument("--no-dialogue-llm", action="store_true", help="Disable dialogue LLM and use deterministic template replies")
+    parser.add_argument("--telemetry-enabled", action="store_true", default=True, help="Enable per-command telemetry CSV logging")
+    parser.add_argument("--telemetry-csv", default=str(_default_telemetry_csv_path()), help="CSV path for telemetry rows")
 
     args = parser.parse_args()
+    session_id = uuid.uuid4().hex
+
+    if args.telemetry_enabled:
+        try:
+            _ensure_telemetry_csv(Path(args.telemetry_csv))
+            print(f"Telemetry CSV: {args.telemetry_csv}")
+        except Exception as exc:
+            print(f"[WARN] Could not initialize telemetry CSV: {exc}")
+            args.telemetry_enabled = False
 
     opcua_target = None
     try:
@@ -1059,6 +1315,17 @@ def main() -> None:
     wake_active = False
     wake_deadline = 0.0
     wake_buffer = ""
+    current_telemetry_ctx: dict[str, object] | None = None
+
+    def _start_telemetry_context(*, raw_text: str, spoken_text: str) -> dict[str, object]:
+        now_ts = time.monotonic()
+        return {
+            "session_id": session_id,
+            "command_id": uuid.uuid4().hex,
+            "raw_recognized_text": raw_text,
+            "spoken_text": spoken_text,
+            "first_chunk_ts": now_ts,
+        }
 
     def _extract_voice_command(text: str) -> Optional[str]:
         spoken = text.strip()
@@ -1087,7 +1354,7 @@ def main() -> None:
         return f"{existing} {chunk.strip()}".strip()
 
     def _finalize_wake_command() -> None:
-        nonlocal wake_active, wake_deadline, wake_buffer
+        nonlocal wake_active, wake_deadline, wake_buffer, current_telemetry_ctx
         with wake_lock:
             command_text = wake_buffer.strip()
             wake_active = False
@@ -1099,7 +1366,12 @@ def main() -> None:
             return
 
         print(f"[voice] Executing: {command_text}")
-        if _process_command(command_text, args, backend, io_client, schema, prompt):
+        telemetry_ctx = current_telemetry_ctx
+        current_telemetry_ctx = None
+        if telemetry_ctx is not None:
+            telemetry_ctx["execute_start_ts"] = time.monotonic()
+
+        if _process_command(command_text, args, backend, io_client, schema, prompt, telemetry_ctx=telemetry_ctx):
             exit_requested.set()
 
     def _wake_monitor_loop() -> None:
@@ -1115,24 +1387,32 @@ def main() -> None:
     wake_monitor_thread: threading.Thread | None = None
 
     def _on_voice_final(text: str) -> None:
-        nonlocal wake_active, wake_deadline, wake_buffer
+        nonlocal wake_active, wake_deadline, wake_buffer, current_telemetry_ctx
         print(f"\nFinal recognized text: {text}")
 
         if args.push_to_talk:
             command_text = _extract_voice_command(text)
             if command_text is None:
                 return
-            if _process_command(command_text, args, backend, io_client, schema, prompt):
+            telemetry_ctx = _start_telemetry_context(raw_text=text, spoken_text=command_text)
+            telemetry_ctx["recording_start_ts"] = telemetry_ctx["first_chunk_ts"]
+            telemetry_ctx["wake_accept_ts"] = telemetry_ctx["first_chunk_ts"]
+            telemetry_ctx["execute_start_ts"] = time.monotonic()
+            if _process_command(command_text, args, backend, io_client, schema, prompt, telemetry_ctx=telemetry_ctx):
                 exit_requested.set()
             return
 
         lowered = text.strip().lower()
         if configured_wake_word and lowered.startswith(configured_wake_word):
             remainder = text[len(configured_wake_word) :].lstrip(" ,:;.-")
+            now_ts = time.monotonic()
             with wake_lock:
                 wake_active = True
                 wake_buffer = remainder
                 wake_deadline = time.time() + args.wake_wait_seconds
+                current_telemetry_ctx = _start_telemetry_context(raw_text=text, spoken_text=remainder)
+                current_telemetry_ctx["wake_accept_ts"] = now_ts
+                current_telemetry_ctx["recording_start_ts"] = now_ts
             if remainder:
                 print(f"[voice] Wake accepted. Captured: {remainder}")
             else:
@@ -1145,6 +1425,10 @@ def main() -> None:
                 return
             wake_buffer = _append_running_text(wake_buffer, text)
             wake_deadline = time.time() + args.wake_wait_seconds
+            if current_telemetry_ctx is not None:
+                current_telemetry_ctx["spoken_text"] = wake_buffer
+                existing_raw = str(current_telemetry_ctx.get("raw_recognized_text", "")).strip()
+                current_telemetry_ctx["raw_recognized_text"] = f"{existing_raw} | {text}" if existing_raw else text
             print(f"[voice] Capturing command: {wake_buffer}")
 
     def _on_voice_error(message: str) -> None:
@@ -1190,7 +1474,11 @@ def main() -> None:
                 continue
 
             user_input = input("\nYou> ").strip()
-            if _process_command(user_input, args, backend, io_client, schema, prompt):
+            telemetry_ctx = _start_telemetry_context(raw_text=user_input, spoken_text=user_input)
+            telemetry_ctx["recording_start_ts"] = telemetry_ctx["first_chunk_ts"]
+            telemetry_ctx["wake_accept_ts"] = telemetry_ctx["first_chunk_ts"]
+            telemetry_ctx["execute_start_ts"] = time.monotonic()
+            if _process_command(user_input, args, backend, io_client, schema, prompt, telemetry_ctx=telemetry_ctx):
                 break
     except KeyboardInterrupt:
         print("\nInterrupted by user.")

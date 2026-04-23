@@ -1,0 +1,154 @@
+1:  OVERRIDE=R[200:Override]
+2:  R[108:Unload enable]=0
+3:  LBL[14]
+4:  UFRAME_NUM=7
+5:  UTOOL_NUM=9
+6:  PAYLOAD[1:Order fulfillment]
+7:  CALL HOMEEE
+8:  WAIT .20(sec)
+9:  IF DO[2:ON :Home_position]=ON,
+ :    JMP LBL[21]
+10: LBL[13]
+11: UALM[1]
+12: JMP LBL[14]
+13:
+14: LBL[21]
+15: --Register_reset_new_order
+16: DO[1:OFF :Order_fulfilled]=OFF
+17: //DO[3:OFF :Cycle_done]=OFF
+18: IF DI[4:OFF :Order_confirmation]=
+ :    ON, JMP LBL[20]
+19: DO[225:OFF :Mask Buttons]=OFF
+20:
+21: JMP LBL[21]
+22: LBL[20]
+23: UFRAME_NUM=7
+24: DO[225:OFF :Mask Buttons]=ON
+25:
+26: IF R[1:Nuttiess Choclae]>0,
+ :    JMP LBL[1]
+27: IF R[2:NIVEA]>0, JMP LBL[2]
+28: IF R[3:Shampoo]>0, JMP LBL[3]
+29: IF R[4:Appy Fizz]>0, JMP LBL[4]
+30: IF R[5:Cough syrup]>0,
+ :    JMP LBL[5]
+31: IF R[6:Coca Cola]>0, JMP LBL[6]
+32: IF R[7:Tea botx]>0, JMP LBL[7]
+33: IF R[8:Pringles]>0, JMP LBL[8]
+34: IF R[9:Noodles]>0, JMP LBL[9]
+35: IF R[10:Bar]>0, JMP LBL[10]
+36: IF R[11:Ponds]>0, JMP LBL[11]
+37: IF R[12:Dove]>0, JMP LBL[12]
+38: IF R[108:Unload enable]=1,
+ :    JMP LBL[22]
+39:
+40:
+41: //IF R[25:tot.no.of.parts]<=0,
+ :    JMP LBL[21]
+42:
+43: LBL[22]
+44: DO[1:OFF :Order_fulfilled]=
+ :    PULSE, 2.0sec
+45: //IF DI[2:OFF :Order_received]=
+ :    ON, JMP LBL[23]
+46: //JMP LBL[22]
+47: //LBL[*23]
+48: --Add_hmi_pg_for_bin_to_rack
+49: WAIT (DI[2:OFF :Order_received])
+ :
+50: CALL BIN2RACK
+51: R[108:Unload enable]=1
+52: --Register_reset_when_bel_DO_ON
+53: //DO[3:OFF :Cycle_done]=ON
+54: --Place_new_order
+55: JMP LBL[21]
+56:
+57: --NuttiesCocolate
+58: LBL[1]
+59:
+60:
+61:
+62: CALL FI_NUTTIES_CHOC
+63: IF R[1:Nuttiess Choclae]>0,
+ :    JMP LBL[1]
+64: R[108:Unload enable]=1
+65: JMP LBL[20]
+66:
+67: --Nivea
+68: LBL[2]
+69: CALL FI_NIVEA
+70: IF R[2:NIVEA]>0, JMP LBL[2]
+71: R[108:Unload enable]=1
+72: JMP LBL[20]
+73:
+74: --ShampooBottle
+75: LBL[3]
+76: CALL FI_SHAMPOOBOTTLE
+77: IF R[3:Shampoo]>0, JMP LBL[3]
+78: R[108:Unload enable]=1
+79: JMP LBL[20]
+80:
+81:
+82: LBL[4]
+83: CALL FI_APPYFIZZ
+84: IF R[4:Appy Fizz]>0, JMP LBL[4]
+85: R[108:Unload enable]=1
+86: JMP LBL[20]
+87:
+88: --Part5
+89: LBL[5]
+90: CALL FI_COUGHSYRUP
+91: IF R[5:Cough syrup]>0,
+ :    JMP LBL[5]
+92: R[108:Unload enable]=1
+93: JMP LBL[20]
+94:
+95: --CocaCola
+96: LBL[6]
+97: CALL FI_COCACOLA
+98: IF R[6:Coca Cola]>0, JMP LBL[6]
+99: R[108:Unload enable]=1
+100: JMP LBL[20]
+101:
+102: --Part7
+103: LBL[7]
+104: CALL FI_TEA
+105: IF R[7:Tea botx]>0, JMP LBL[7]
+106: R[108:Unload enable]=1
+107: JMP LBL[20]
+108:
+109: --Part8
+110: LBL[8]
+111: CALL FI_PRINGLES
+112: IF R[8:Pringles]>0, JMP LBL[8]
+113: R[108:Unload enable]=1
+114: JMP LBL[20]
+115:
+116: --Part9
+117: LBL[9]
+118: CALL FI_NOODLES
+119: IF R[9:Noodles]>0, JMP LBL[9]
+120: R[108:Unload enable]=1
+121: JMP LBL[20]
+122:
+123: --Part10
+124: LBL[10]
+125: CALL FI_BAR
+126: IF R[10:Bar]>0, JMP LBL[10]
+127: R[108:Unload enable]=1
+128: JMP LBL[20]
+129:
+130: --Part11
+131: LBL[11]
+132: CALL FI_PONDS
+133: IF R[11:Ponds]>0, JMP LBL[11]
+134: R[108:Unload enable]=1
+135: JMP LBL[20]
+136:
+137: --Part12
+138: LBL[12]
+139: CALL FI_DOVE
+140: IF R[12:Dove]>0, JMP LBL[12]
+141: R[108:Unload enable]=1
+142: JMP LBL[20]
+[End]

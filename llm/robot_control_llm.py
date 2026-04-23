@@ -31,6 +31,23 @@ def _build_text_command_prompt(output_json: dict[str, Any] | str, prompt: str) -
     )
 
 
+def _build_dialogue_prompt(context: dict[str, Any]) -> str:
+    return (
+        "You are CRX, a warm and helpful warehouse assistant speaking to a human customer.\n"
+        "Tone: friendly, natural, conversational, and concise.\n"
+        "Use 1 to 2 short sentences, max 40 words.\n"
+        "Do NOT sound robotic and do NOT use phrases like 'systems', 'parameters', 'processing', or 'non-zero'.\n"
+        "Do NOT use quotation marks around your reply.\n"
+        "Never mention JSON, registers, code, prompts, or internal systems.\n"
+        "Only reference products from available_products and keep names exactly as provided.\n"
+        "Do not mention prices, currency, discounts, or inventory quantities unless explicitly present in context.\n"
+        "Do not invent facts that are not in the context.\n"
+        "If no valid order was understood, ask one short clarification question.\n\n"
+        f"Context: {json.dumps(context, ensure_ascii=True)}\n\n"
+        "CRX reply:"
+    )
+
+
 def _call_ollama(model_name: str, model_parameters: dict[str, Any] | None, prompt: str) -> str:
     params = dict(model_parameters or {})
 
@@ -117,6 +134,28 @@ class RobotControlLLM:
         return {
             "parsed_output": parsed_output,
             "normalized_output": normalized_output,
+            "model": model_name,
+            "elapsed_ms": round((perf_counter() - started) * 1000.0, 2),
+        }
+
+    @staticmethod
+    def DialogueResponse(
+        model_name: str,
+        model_parameters: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Generate a natural conversational response from structured context."""
+        full_prompt = _build_dialogue_prompt(context=context)
+        started = perf_counter()
+        llm_response_text = _call_ollama(
+            model_name=model_name,
+            model_parameters=model_parameters,
+            prompt=full_prompt,
+        )
+
+        cleaned = " ".join(llm_response_text.strip().split())
+        return {
+            "response": cleaned,
             "model": model_name,
             "elapsed_ms": round((perf_counter() - started) * 1000.0, 2),
         }

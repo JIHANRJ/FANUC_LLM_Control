@@ -148,3 +148,78 @@ If `--register-writer-cmd` is omitted, simulation backend is used automatically.
 - For `add_order`, controller increments from current values.
 - `R[25]` is always recomputed as sum of `R[1..12]`.
 - `R[108]` is reset to `0` on new/updated orders.
+
+## Conversational A/B Comparison (Template vs Dialogue-LLM)
+
+This section documents a reproducible comparison using the same twisted prompt set across two modes:
+
+1. Template mode:
+python3 "LLM order fulfilment/order_fulfilment_controller.py" llama3.1:8b --simulation --no-dialogue-llm
+
+2. Dialogue-LLM mode:
+python3 "LLM order fulfilment/order_fulfilment_controller.py" llama3.1:8b --simulation --dialogue-model llama3.1:8b --dialogue-timeout 12 --dialogue-temperature 0.7
+
+Environment note:
+- On this machine, only llama3.1:8b is installed locally via Ollama.
+- This comparison is therefore mode-to-mode on the same model, not model-to-model.
+
+### Twisted Prompt Set (11 examples)
+
+1. Input: CRX what products do we have?
+- Template reply: Great question. I can fetch: Nuttiess Choclae, NIVEA, Shampoo, Appy Fizz, Cough Syrup, Coca Cola, Tea botx, Pringles, Noodles, Chocolate Bar, Ponds, Dove soap. If you want a recommendation, I can suggest by snack, drink, or skincare.
+- Dialogue reply: We've got a variety of products in stock, including Nuttiess Choclae, NIVEA, Shampoo, Appy Fizz, and many others. Would you like me to list them all out for you?
+
+2. Input: CRX I need some soap which would you recommend?
+- Template reply: Great question. I can fetch: Nuttiess Choclae, NIVEA, Shampoo, Appy Fizz, Cough Syrup, Coca Cola, Tea botx, Pringles, Noodles, Chocolate Bar, Ponds, Dove soap. If you want a recommendation, I can suggest by snack, drink, or skincare.
+- Dialogue reply: We have NIVEA and Ponds soaps that are quite popular. Would you like me to tell you a bit more about them?
+
+3. Input: CRX get me a snack
+- Template reply: Lovely choice. I'll fetch 1 NIVEA and 1 Shampoo for you right now.
+- Dialogue reply: You need a snack, right? I've got just the thing - our Nuttiess Choclae is really popular. Would you like to try some?
+
+4. Input: CRX get me 3 pringles 2 noodles and a bar
+- Template reply: Lovely choice. I'll fetch 3 Pringles, 2 Noodles, and 1 Chocolate Bar for you right now.
+- Dialogue reply: Got your order! I've got 3 Pringles, 2 Noodles, and a Chocolate Bar ready for you. Total of 6 items.
+
+5. Input: CRX actually new order just give me a pringles
+- Template reply: Absolutely. I'll grab your Pringles right away.
+- Dialogue reply: Here's your Pringles, one pack. Would you like to add anything else?
+
+6. Input: CRX replace that with a coca cola
+- Template reply: Absolutely. I'll grab your Coca Cola right away.
+- Dialogue reply: I've added a Coca Cola to your order. That'll be one item total.
+
+7. Input: CRX what is there to eat?
+- Template reply: Great question. I can fetch: Nuttiess Choclae, NIVEA, Shampoo, Appy Fizz, Cough Syrup, Coca Cola, Tea botx, Pringles, Noodles, Chocolate Bar, Ponds, Dove soap. If you want a recommendation, I can suggest by snack, drink, or skincare.
+- Dialogue reply: We've got a bunch of food items, like Appy Fizz and Pringles. There's also some snacks like Chocolate Bar and Nuttiess Choclae if you're interested.
+
+8. Input: CRX do you recommend ponds or dove?
+- Template reply: Great question. I can fetch: Nuttiess Choclae, NIVEA, Shampoo, Appy Fizz, Cough Syrup, Coca Cola, Tea botx, Pringles, Noodles, Chocolate Bar, Ponds, Dove soap. If you want a recommendation, I can suggest by snack, drink, or skincare.
+- Dialogue reply: Both Ponds and Dove are great choices, but if I had to pick one, I'd say the Dove soap is a popular option among customers. Would you like me to tell you more about that?
+
+9. Input: CRX add one dove and two fizzes plus a shampoo
+- Template reply: Perfect, I added 1 Dove soap, 2 Appy Fizz, and 1 Shampoo. Your total is now 5 items.
+- Dialogue reply: I've added one Dove soap, two Appy Fizzes, and a shampoo to your order. That makes five items in total now.
+
+10. Input: CRX clear order
+- Template reply: Done, your order is cleared and we're starting fresh. Tell me what you'd like next.
+- Dialogue reply: Your order is cleared. What can I help you find or add today?
+
+11. Input: CRX status
+- Template reply: Your order is currently empty. Tell me what you'd like, and I'll grab it for you.
+- Dialogue reply: I'm functioning normally, ready to assist with your order. What can I help you find or add today?
+
+### Findings
+
+1. Dialogue-LLM mode is clearly more interactive, context-rich, and human-like.
+2. Template mode is safer and more deterministic, but noticeably repetitive.
+3. Some edge prompts still need parser tuning (example: snack mapping in template mode), and telemetry logs make these regressions easy to track.
+4. For production voice UX, use Dialogue-LLM mode with fallback available via --no-dialogue-llm when needed.
+
+### Recommended next benchmark
+
+Run the same twisted prompt set across additional Ollama models once installed, then compare:
+
+1. conversational quality (human-likeness)
+2. safety consistency (intent/write correctness)
+3. latency using the telemetry CSV in LLM order fulfilment/logs/voice_metrics.csv
