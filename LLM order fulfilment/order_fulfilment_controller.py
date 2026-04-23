@@ -56,7 +56,7 @@ PRODUCTS: tuple[Product, ...] = (
     Product("nuttiess_choclae", 1, "Nuttiess Choclae", ("nutties", "nuttiess", "nutties chocolate", "nuttiess choclae", "nutties choclate", "nuttiess chocolate")),
     Product("nivea", 2, "NIVEA", ("nivea", "niva", "niviea")),
     Product("shampoo", 3, "Shampoo", ("shampoo", "shampoo bottle", "shampoobottle")),
-    Product("appy_fizz", 4, "Appy Fizz", ("appy fizz", "appyfizz")),
+    Product("appy_fizz", 4, "Appy Fizz", ("appy fizz", "appyfizz", "fizz", "fizzes", "appy fizzes", "appy fiz")),
     Product("cough_syrup", 5, "Cough Syrup", ("cough syrup", "coughsyrup", "syrup")),
     Product("coca_cola", 6, "Coca Cola", ("coca cola", "coke", "cocacola")),
     Product("tea_botx", 7, "Tea botx", ("tea", "tea box", "tea botx", "teabox")),
@@ -225,12 +225,31 @@ def _normalize_item(raw_item: str) -> Optional[str]:
     normalized = raw_item.lower().strip().strip(".,;:!?")
     normalized = normalized.replace("_", " ")
     normalized = " ".join(part for part in normalized.split() if part)
+    for prefix in ("of ", "the ", "a ", "an "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
     for suffix in (" please", " pls", " kindly", " now"):
         if normalized.endswith(suffix):
             normalized = normalized[: -len(suffix)].strip()
 
     if normalized in ALIAS_TO_KEY:
         return ALIAS_TO_KEY[normalized]
+
+    # Basic singularization/plural normalization for voice-text variability.
+    plural_candidates = [normalized]
+    if normalized.endswith("es"):
+        plural_candidates.append(normalized[:-2].strip())
+    if normalized.endswith("s"):
+        plural_candidates.append(normalized[:-1].strip())
+
+    for candidate in plural_candidates:
+        if candidate in ALIAS_TO_KEY:
+            return ALIAS_TO_KEY[candidate]
+
+    # Contains-match fallback for phrases like "appy fizzes" or "nivea cream".
+    for alias, key in ALIAS_TO_KEY.items():
+        if alias and (alias in normalized or normalized in alias):
+            return key
 
     return None
 
@@ -351,8 +370,11 @@ def _extract_items_from_text(user_text: str) -> list[tuple[str, int]]:
     if not text:
         return []
 
-    # Capture phrases like "4 nutties" or "three nivea" separated by comma/and/end.
-    pattern = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+([a-z_ ]+?)(?=\s*(?:,|and|&|$))"
+    # Capture phrases like "4 nutties", "three nivea", "6 of appy fizz", etc.
+    pattern = (
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+        r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+([a-z_ ]+?)(?=\s*(?:,|and|&|plus|with|then|$))"
+    )
     matches = re.findall(pattern, text)
     extracted: list[tuple[str, int]] = []
 
