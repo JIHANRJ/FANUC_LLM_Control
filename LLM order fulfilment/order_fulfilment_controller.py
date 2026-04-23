@@ -384,7 +384,7 @@ Available product targets (canonical keys):
 
 Return ONLY JSON with this shape:
 {
-  "intent": "set_order",
+    "intent": "add_order",
   "items": [{"item": "nivea", "quantity": 2}],
   "notes": "short summary"
 }
@@ -392,9 +392,11 @@ Return ONLY JSON with this shape:
 Intent rules:
 - set_order: replace current order with provided items/quantities.
 - add_order: add quantities to existing order.
+- remove_order: subtract quantities from existing order (floor at 0).
 - clear_order: clear all product quantities.
 - status: user asks to inspect current order status.
 - product_list: user asks what products are available / for sale.
+- vend_order: user asks to execute/checkout/confirm vend for current cart.
 
 Parsing rules:
 1. Parse the full utterance, including multiple products.
@@ -405,7 +407,7 @@ Parsing rules:
 6. If user asks status/current order, return intent=status and items=[].
 7. If user asks for available products/menu/list, return intent=product_list and items=[].
 8. If user provides products with no quantity, assume quantity=1.
-9. Quantity must be integer >= 1 for set_order/add_order.
+9. Quantity must be integer >= 1 for set_order/add_order/remove_order.
 """
 
 
@@ -526,6 +528,22 @@ def _derive_intent_from_text(user_text: str) -> str:
     if any(
         token in lowered
         for token in (
+            "ready to vend",
+            "vend now",
+            "execute vend",
+            "execute order",
+            "checkout",
+            "place order",
+            "confirm order",
+            "go ahead",
+            "proceed",
+        )
+    ):
+        return "vend_order"
+
+    if any(
+        token in lowered
+        for token in (
             "recommend",
             "suggest",
             "what should i get",
@@ -574,16 +592,24 @@ def _derive_intent_from_text(user_text: str) -> str:
         return "status"
     has_clear_phrase = any(token in lowered for token in ("clear order", "reset order", "remove all", "clear all", "new order", "reset"))
     has_replace_phrase = any(token in lowered for token in ("replace", "instead", "actually"))
-    has_add_phrase = any(token in lowered for token in ("add", "plus", "increase", "also", "another", "too"))
+    has_add_phrase = any(token in lowered for token in ("add", "plus", "increase", "also", "another", "too", "get me", "i want", "i need", "bring me"))
+    has_remove_phrase = any(token in lowered for token in ("remove", "delete", "take out", "minus", "reduce", "drop", "cancel"))
+    has_set_phrase = any(token in lowered for token in ("set order", "replace order", "new order", "start new order"))
     has_order_request = bool(_extract_items_from_text(lowered))
 
     if has_clear_phrase and not has_order_request:
         return "clear_order"
     if has_clear_phrase and has_order_request:
         return "set_order"
+    if has_remove_phrase:
+        return "remove_order"
     if has_replace_phrase:
         return "set_order"
+    if has_set_phrase:
+        return "set_order"
     if has_add_phrase:
+        return "add_order"
+    if has_order_request:
         return "add_order"
     return "set_order"
 
@@ -602,11 +628,11 @@ def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple
 
     for container in candidate_containers:
         raw_intent = str(container.get("intent", "set_order")).lower().strip()
-        parsed_intent = raw_intent if raw_intent in {"set_order", "add_order", "clear_order", "status", "product_list"} else "set_order"
+        parsed_intent = raw_intent if raw_intent in {"set_order", "add_order", "remove_order", "clear_order", "status", "product_list", "vend_order"} else "set_order"
         parsed_items = _extract_items_from_container(container)
 
         # Keep the best signal: explicit status/clear intent or any non-empty items list.
-        if parsed_intent in {"status", "clear_order", "product_list"}:
+        if parsed_intent in {"status", "clear_order", "product_list", "vend_order"}:
             intent = parsed_intent
             items = parsed_items
             break
@@ -615,7 +641,7 @@ def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple
             items = parsed_items
             break
 
-    if not items and intent in {"set_order", "add_order"}:
+    if not items and intent in {"set_order", "add_order", "remove_order"}:
         text_items = _extract_items_from_text(user_text)
         if text_items:
             items = text_items
@@ -623,14 +649,16 @@ def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple
             lowered = user_text.lower()
             if any(token in lowered for token in ("add", "plus", "increase", "also", "another", "too")):
                 intent = "add_order"
+            if any(token in lowered for token in ("remove", "delete", "take out", "minus", "reduce", "drop", "cancel")):
+                intent = "remove_order"
 
     # Reconcile LLM intent with deterministic text intent when possible.
     derived_intent = _derive_intent_from_text(user_text)
-    if derived_intent in {"status", "clear_order", "product_list"}:
+    if derived_intent in {"status", "clear_order", "product_list", "vend_order"}:
         # Safety: never let LLM-invented items trigger register writes for query intents.
         return derived_intent, []
 
-    if items and derived_intent in {"set_order", "add_order"}:
+    if items and derived_intent in {"set_order", "add_order", "remove_order"}:
         intent = derived_intent
 
     return intent, items
@@ -676,6 +704,25 @@ def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: Re
             "state": _read_order_state(backend),
         }
 
+    if intent == "vend_order":
+        state = _read_order_state(backend)
+        total = sum(state.values())
+        if total < 1:
+            return {
+                "success": False,
+                "message": "Cart is empty. Add items before vending.",
+                "state": state,
+            }
+        if not backend.write_register(ORDER_REG_TOTAL_PARTS, total):
+            return {"success": False, "message": f"Failed writing R[{ORDER_REG_TOTAL_PARTS}]"}
+        if not backend.write_register(ORDER_REG_UNLOAD_ENABLE, 1):
+            return {"success": False, "message": f"Failed writing R[{ORDER_REG_UNLOAD_ENABLE}]"}
+        return {
+            "success": True,
+            "message": f"Vend requested. R[{ORDER_REG_UNLOAD_ENABLE}]=1 with total_parts={total}",
+            "state": state,
+        }
+
     if intent == "status":
         state = _read_order_state(backend)
         recomputed_total = sum(state.values())
@@ -705,7 +752,7 @@ def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: Re
             "state": _read_order_state(backend),
         }
 
-    if intent in {"set_order", "add_order"} and not items:
+    if intent in {"set_order", "add_order", "remove_order"} and not items:
         return {
             "success": False,
             "message": "No valid items were parsed from command.",
@@ -720,6 +767,8 @@ def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: Re
     for item_key, quantity in items:
         if intent == "add_order":
             new_value = state[item_key] + quantity
+        elif intent == "remove_order":
+            new_value = max(0, state[item_key] - quantity)
         else:
             new_value = quantity
 
@@ -778,6 +827,8 @@ def _spoken_list(items: list[tuple[str, int]]) -> str:
 
 def _build_crx_reply_template(intent: str, items: list[tuple[str, int]], result: dict) -> str:
     if not result.get("success"):
+        if intent == "vend_order":
+            return "Your cart is empty right now. Add items first, then say ready to vend."
         return "I didn't quite catch that, but I'm here to help. Could you say it one more time?"
 
     if intent == "status":
@@ -813,8 +864,21 @@ def _build_crx_reply_template(intent: str, items: list[tuple[str, int]], result:
         if len(items) == 1:
             item_key, qty = items[0]
             label = VOICE_LABEL_BY_KEY.get(item_key, item_key.replace("_", " ").title())
-            return f"Awesome, I added {qty} {label}. Your total is now {total} {item_word}."
-        return f"Perfect, I added {_spoken_list(items)}. Your total is now {total} {item_word}."
+            return f"Added to cart: {qty} {label}. Your cart now has {total} {item_word}."
+        return f"Added to cart: {_spoken_list(items)}. Your cart now has {total} {item_word}."
+
+    if intent == "remove_order":
+        state = result.get("state", {})
+        total = sum(int(v or 0) for v in state.values())
+        item_word = "item" if total == 1 else "items"
+        if len(items) == 1:
+            item_key, qty = items[0]
+            label = VOICE_LABEL_BY_KEY.get(item_key, item_key.replace("_", " ").title())
+            return f"Removed {qty} {label} from cart. Your cart now has {total} {item_word}."
+        return f"Updated cart: removed {_spoken_list(items)}. Your cart now has {total} {item_word}."
+
+    if intent == "vend_order":
+        return "Great, you're ready to vend. Executing your cart now."
 
     if len(items) == 1:
         item_key, qty = items[0]
@@ -1066,8 +1130,11 @@ def _process_command(
         print(f"[OK] Probe success for R[{register_index}]: wrote={value}, read={readback}")
         return False
 
-    if lowered in {"status", "products", "product list", "show products", "show product list", "menu"}:
-        quick_intent = "product_list" if "product" in lowered or lowered in {"products", "menu"} else "status"
+    if lowered in {"status", "products", "product list", "show products", "show product list", "menu", "ready to vend", "vend", "vend now", "checkout", "place order", "confirm order"}:
+        if lowered in {"ready to vend", "vend", "vend now", "checkout", "place order", "confirm order"}:
+            quick_intent = "vend_order"
+        else:
+            quick_intent = "product_list" if "product" in lowered or lowered in {"products", "menu"} else "status"
         _finalize_and_respond(
             intent=quick_intent,
             items=[],
@@ -1283,9 +1350,11 @@ def main() -> None:
     print(f"  R[{ORDER_REG_TOTAL_PARTS}] total parts")
     print(f"  R[{ORDER_REG_UNLOAD_ENABLE}] unload enable")
     print("\nExamples:")
-    print("  • set order: 2 nivea, 1 dove, 3 pringles")
+    print("  • add to cart: 2 nivea, 1 dove, 3 pringles")
     print("  • add 1 shampoo and 2 noodles")
+    print("  • remove 1 dove")
     print("  • clear order")
+    print("  • ready to vend")
     print("  • status")
     print("  • readreg 25")
     print("  • writereg 25 3")

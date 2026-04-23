@@ -106,10 +106,18 @@ python3 "LLM order fulfilment/order_fulfilment_controller.py" llama3.1:8b --simu
 
 Example commands:
 
-- `set order 2 nivea, 1 dove, 3 pringles`
-- `add 1 shampoo and 2 noodles`
+- `get me a coke`
+- `also add 2 pringles`
+- `remove 1 pringles`
+- `ready to vend`
 - `clear order`
 - `status`
+
+Cart behavior notes:
+- Product requests are cart-additive by default (they do not reset cart each turn).
+- Use explicit replacement phrases (`new order`, `replace`) to reset and set fresh values.
+- Use remove phrases (`remove`, `delete`, `minus`, `reduce`) to subtract quantities.
+- `ready to vend` / `vend now` / `checkout` sets `R[108]=1` when cart has items.
 
 ## Voice Mode
 
