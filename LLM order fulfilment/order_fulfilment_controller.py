@@ -56,7 +56,7 @@ PRODUCTS: tuple[Product, ...] = (
     Product("nuttiess_choclae", 1, "Nuttiess Choclae", ("nutties", "nuttiess", "nutties chocolate", "nuttiess choclae", "nutties choclate", "nuttiess chocolate")),
     Product("nivea", 2, "NIVEA", ("nivea", "niva", "niviea")),
     Product("shampoo", 3, "Shampoo", ("shampoo", "shampoo bottle", "shampoobottle")),
-    Product("appy_fizz", 4, "Appy Fizz", ("appy fizz", "appyfizz", "fizz", "fizzes", "appy fizzes", "appy fiz")),
+    Product("appy_fizz", 4, "Appy Fizz", ("appy fizz", "appyfizz", "fizz", "fizzes", "appy fizzes", "appy fiz", "fizzy drink", "fizzy")),
     Product("cough_syrup", 5, "Cough Syrup", ("cough syrup", "coughsyrup", "syrup")),
     Product("coca_cola", 6, "Coca Cola", ("coca cola", "coke", "cocacola")),
     Product("tea_botx", 7, "Tea botx", ("tea", "tea box", "tea botx", "teabox")),
@@ -64,7 +64,7 @@ PRODUCTS: tuple[Product, ...] = (
     Product("noodles", 9, "Noodles", ("noodles", "noodle")),
     Product("bar", 10, "Bar", ("bar", "chocolate bar")),
     Product("ponds", 11, "Ponds", ("ponds", "ponds cream")),
-    Product("dove", 12, "Dove", ("dove", "dove soap")),
+    Product("dove", 12, "Dove", ("dove", "dove soap", "soap")),
 )
 
 ORDER_REG_TOTAL_PARTS = 25
@@ -90,7 +90,22 @@ CURRENT_STATE = {
     "last_updated": None,
 }
 
-BUILD_VERSION = "2026-04-23-local-parser-v2"
+BUILD_VERSION = "2026-04-23-voice-reply-v1"
+
+VOICE_LABEL_BY_KEY = {
+    "nuttiess_choclae": "Nuttiess Choclae",
+    "nivea": "NIVEA",
+    "shampoo": "Shampoo",
+    "appy_fizz": "Appy Fizz",
+    "cough_syrup": "Cough Syrup",
+    "coca_cola": "Coca Cola",
+    "tea_botx": "Tea botx",
+    "pringles": "Pringles",
+    "noodles": "Noodles",
+    "bar": "Chocolate Bar",
+    "ponds": "Ponds",
+    "dove": "Dove soap",
+}
 
 
 class RegisterBackend:
@@ -296,6 +311,7 @@ Intent rules:
 - add_order: add quantities to existing order.
 - clear_order: clear all product quantities.
 - status: user asks to inspect current order status.
+- product_list: user asks what products are available / for sale.
 
 Parsing rules:
 1. Parse the full utterance, including multiple products.
@@ -304,8 +320,9 @@ Parsing rules:
 4. Use canonical key names only.
 5. If user asks to clear/reset order, return intent=clear_order and items=[].
 6. If user asks status/current order, return intent=status and items=[].
-7. If user provides products with no quantity, assume quantity=1.
-8. Quantity must be integer >= 1 for set_order/add_order.
+7. If user asks for available products/menu/list, return intent=product_list and items=[].
+8. If user provides products with no quantity, assume quantity=1.
+9. Quantity must be integer >= 1 for set_order/add_order.
 """
 
 
@@ -370,11 +387,16 @@ def _extract_items_from_text(user_text: str) -> list[tuple[str, int]]:
     if not text:
         return []
 
+    qty_token = (
+        r"\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+        r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
+    )
+
     # Capture phrases like "4 nutties", "three nivea", "6 of appy fizz", etc.
     pattern = (
-        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
-        r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+([a-z_ ]+?)(?=\s*(?:,|and|&|plus|with|then|$))"
+        rf"({qty_token})\s+([a-z_ ]+?)(?=\s*(?:,|and|&|plus|with|then|(?:{qty_token})|$))"
     )
+    implied_one_pattern = rf"(?:\ba\b|\ban\b|\bsome\b)\s+([a-z_ ]+?)(?=\s*(?:,|and|&|plus|with|then|(?:{qty_token})|$))"
     matches = re.findall(pattern, text)
     extracted: list[tuple[str, int]] = []
 
@@ -387,16 +409,98 @@ def _extract_items_from_text(user_text: str) -> list[tuple[str, int]]:
             continue
         extracted.append((item_key, qty))
 
-    return extracted
+    for raw_item in re.findall(implied_one_pattern, text):
+        item_key = _normalize_item(raw_item)
+        if item_key is None:
+            continue
+        extracted.append((item_key, 1))
+
+    # Fallback for bare item mentions like "fizzy drink" without an explicit quantity.
+    if not extracted:
+        seen_keys: set[str] = set()
+        for alias in sorted(ALIAS_TO_KEY.keys(), key=len, reverse=True):
+            if not alias:
+                continue
+            if re.search(rf"\b{re.escape(alias)}\b", text):
+                key = ALIAS_TO_KEY[alias]
+                if key in seen_keys:
+                    continue
+                extracted.append((key, 1))
+                seen_keys.add(key)
+
+    if not extracted:
+        return []
+
+    aggregated: dict[str, int] = {}
+    for item_key, qty in extracted:
+        aggregated[item_key] = aggregated.get(item_key, 0) + qty
+
+    return [(item_key, qty) for item_key, qty in aggregated.items()]
 
 
 def _derive_intent_from_text(user_text: str) -> str:
     lowered = user_text.lower()
-    if any(token in lowered for token in ("status", "current order", "show order")):
+    if any(
+        token in lowered
+        for token in (
+            "recommend",
+            "suggest",
+            "what should i get",
+            "which one",
+            "which would you",
+        )
+    ):
+        return "product_list"
+
+    if any(
+        token in lowered
+        for token in (
+            "product list",
+            "products list",
+            "show products",
+            "show product",
+            "show me your product list",
+            "what products",
+            "what all products",
+            "products do you have",
+            "items do you have",
+            "for sale",
+            "menu",
+            "catalog",
+        )
+    ):
+        return "product_list"
+
+    if any(
+        token in lowered
+        for token in (
+            "status",
+            "current order",
+            "show order",
+            "what's my order",
+            "whats my order",
+            "my order",
+            "what do we have",
+            "what are now",
+            "amount of items",
+            "how many items",
+            "how much items",
+            "items are present",
+        )
+    ):
         return "status"
-    if any(token in lowered for token in ("clear order", "reset order", "remove all", "clear all")):
+    has_clear_phrase = any(token in lowered for token in ("clear order", "reset order", "remove all", "clear all", "new order", "reset"))
+    has_replace_phrase = any(token in lowered for token in ("replace", "instead", "actually"))
+    has_add_phrase = any(token in lowered for token in ("add", "plus", "increase", "also", "another", "too"))
+    has_order_request = bool(_extract_items_from_text(lowered))
+
+    if has_clear_phrase and not has_order_request:
         return "clear_order"
-    if any(token in lowered for token in ("add", "plus", "increase")):
+    if has_clear_phrase and has_order_request:
+        return "set_order"
+    if has_replace_phrase:
+        return "set_order"
+    if has_add_phrase:
         return "add_order"
     return "set_order"
 
@@ -415,11 +519,11 @@ def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple
 
     for container in candidate_containers:
         raw_intent = str(container.get("intent", "set_order")).lower().strip()
-        parsed_intent = raw_intent if raw_intent in {"set_order", "add_order", "clear_order", "status"} else "set_order"
+        parsed_intent = raw_intent if raw_intent in {"set_order", "add_order", "clear_order", "status", "product_list"} else "set_order"
         parsed_items = _extract_items_from_container(container)
 
         # Keep the best signal: explicit status/clear intent or any non-empty items list.
-        if parsed_intent in {"status", "clear_order"}:
+        if parsed_intent in {"status", "clear_order", "product_list"}:
             intent = parsed_intent
             items = parsed_items
             break
@@ -434,8 +538,17 @@ def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple
             items = text_items
             # If user says add/increase, preserve add_order behavior.
             lowered = user_text.lower()
-            if any(token in lowered for token in ("add", "plus", "increase")):
+            if any(token in lowered for token in ("add", "plus", "increase", "also", "another", "too")):
                 intent = "add_order"
+
+    # Reconcile LLM intent with deterministic text intent when possible.
+    derived_intent = _derive_intent_from_text(user_text)
+    if derived_intent in {"status", "clear_order", "product_list"}:
+        # Safety: never let LLM-invented items trigger register writes for query intents.
+        return derived_intent, []
+
+    if items and derived_intent in {"set_order", "add_order"}:
+        intent = derived_intent
 
     return intent, items
 
@@ -473,6 +586,13 @@ def _recompute_totals(backend: RegisterBackend) -> bool:
 
 
 def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: RegisterBackend) -> dict:
+    if intent == "product_list":
+        return {
+            "success": True,
+            "message": "Available products requested.",
+            "state": _read_order_state(backend),
+        }
+
     if intent == "status":
         state = _read_order_state(backend)
         recomputed_total = sum(state.values())
@@ -557,6 +677,89 @@ def _validate_robot_signals(io_client: Optional[FanucIOClient]) -> None:
         )
     except Exception as exc:
         print(f"[WARN] Could not read TP-related IO signals: {exc}")
+
+
+def _spoken_list(items: list[tuple[str, int]]) -> str:
+    parts: list[str] = []
+    for item_key, qty in items:
+        label = VOICE_LABEL_BY_KEY.get(item_key, item_key.replace("_", " ").title())
+        parts.append(f"{qty} {label}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + f", and {parts[-1]}"
+
+
+def _build_crx_reply(intent: str, items: list[tuple[str, int]], result: dict) -> str:
+    if not result.get("success"):
+        return "I didn't quite catch that, but I'm here to help. Could you say it one more time?"
+
+    if intent == "status":
+        state = result.get("state", {})
+        total = sum(int(v or 0) for v in state.values())
+        item_word = "item" if total == 1 else "items"
+        non_zero = []
+        for product in PRODUCTS:
+            qty = int(state.get(product.key, 0) or 0)
+            if qty > 0:
+                label = VOICE_LABEL_BY_KEY.get(product.key, product.description)
+                non_zero.append(f"{qty} {label}")
+        if non_zero:
+            listed = ", ".join(non_zero)
+            return f"You currently have {total} {item_word} in your order: {listed}. Want me to add anything else?"
+        return "Your order is currently empty. Tell me what you'd like, and I'll grab it for you."
+
+    if intent == "product_list":
+        product_names = [VOICE_LABEL_BY_KEY.get(product.key, product.description) for product in PRODUCTS]
+        return (
+            "Great question. I can fetch: "
+            + ", ".join(product_names)
+            + ". If you want a recommendation, I can suggest by snack, drink, or skincare."
+        )
+
+    if intent == "clear_order":
+        return "Done, your order is cleared and we're starting fresh. Tell me what you'd like next."
+
+    if intent == "add_order":
+        state = result.get("state", {})
+        total = sum(int(v or 0) for v in state.values())
+        item_word = "item" if total == 1 else "items"
+        if len(items) == 1:
+            item_key, qty = items[0]
+            label = VOICE_LABEL_BY_KEY.get(item_key, item_key.replace("_", " ").title())
+            return f"Awesome, I added {qty} {label}. Your total is now {total} {item_word}."
+        return f"Perfect, I added {_spoken_list(items)}. Your total is now {total} {item_word}."
+
+    if len(items) == 1:
+        item_key, qty = items[0]
+        label = VOICE_LABEL_BY_KEY.get(item_key, item_key.replace("_", " ").title())
+        qty_text = f"{qty} " if qty > 1 else ""
+        return f"Absolutely. I'll grab your {qty_text}{label} right away."
+
+    return f"Lovely choice. I'll fetch {_spoken_list(items)} for you right now."
+
+
+def _finalize_and_respond(
+    *,
+    intent: str,
+    items: list[tuple[str, int]],
+    backend: RegisterBackend,
+    io_client: Optional[FanucIOClient],
+) -> None:
+    result = _execute_order_update(intent, items, backend)
+    print(result["message"])
+    if result.get("state"):
+        _print_state_table(result["state"])
+    if result.get("success"):
+        CURRENT_STATE["last_intent"] = intent
+        CURRENT_STATE["last_items"] = items
+        CURRENT_STATE["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    print(f"CRX> {_build_crx_reply(intent, items, result)}")
+    _validate_robot_signals(io_client)
 
 
 def _print_state_table(state: dict[str, int]) -> None:
@@ -647,27 +850,27 @@ def _process_command(
         print(f"[OK] Probe success for R[{register_index}]: wrote={value}, read={readback}")
         return False
 
-    if lowered == "status":
-        result = _execute_order_update("status", [], backend)
-        print(result["message"])
-        _print_state_table(result.get("state", {}))
-        _validate_robot_signals(io_client)
+    if lowered in {"status", "products", "product list", "show products", "show product list", "menu"}:
+        quick_intent = "product_list" if "product" in lowered or lowered in {"products", "menu"} else "status"
+        _finalize_and_respond(
+            intent=quick_intent,
+            items=[],
+            backend=backend,
+            io_client=io_client,
+        )
         return False
 
     # Deterministic local parse first for phrases like "3 nivea and 4 nutties".
     local_intent = _derive_intent_from_text(user_input)
     local_items = _extract_items_from_text(user_input)
-    if local_intent in {"status", "clear_order"} or local_items:
+    if local_intent in {"status", "clear_order", "product_list"} or local_items:
         print(f"[PARSED:LOCAL] intent={local_intent}, items={local_items}")
-        result = _execute_order_update(local_intent, local_items, backend)
-        print(result["message"])
-        if result.get("state"):
-            _print_state_table(result["state"])
-        if result.get("success"):
-            CURRENT_STATE["last_intent"] = local_intent
-            CURRENT_STATE["last_items"] = local_items
-            CURRENT_STATE["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        _validate_robot_signals(io_client)
+        _finalize_and_respond(
+            intent=local_intent,
+            items=local_items,
+            backend=backend,
+            io_client=io_client,
+        )
         return False
 
     try:
@@ -687,18 +890,12 @@ def _process_command(
 
         intent, items = _parse_llm_output(llm_result, user_input)
         print(f"[PARSED] intent={intent}, items={items}")
-        result = _execute_order_update(intent, items, backend)
-        print(result["message"])
-
-        if result.get("state"):
-            _print_state_table(result["state"])
-
-        if result.get("success"):
-            CURRENT_STATE["last_intent"] = intent
-            CURRENT_STATE["last_items"] = items
-            CURRENT_STATE["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-        _validate_robot_signals(io_client)
+        _finalize_and_respond(
+            intent=intent,
+            items=items,
+            backend=backend,
+            io_client=io_client,
+        )
 
     except ConnectionError as exc:
         print(f"[ERROR] Connection error: {exc}")
