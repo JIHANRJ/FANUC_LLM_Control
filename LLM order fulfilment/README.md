@@ -17,6 +17,8 @@ It supports:
 - Optional external register bridge command for real register writes
 - OPC UA register backend for FANUC Holding Register mapping
 
+This folder now includes `fanuc_register_opcua.py` and uses it directly for register writes.
+
 ## Increment 1: Text-Only OPC UA Validation
 
 For this phase, validate OPC UA connectivity and one register write/read cycle first.
@@ -33,25 +35,24 @@ python -m pip install opcua
 
 ```bash
 python3 "LLM order fulfilment/order_fulfilment_controller.py" llama3.1:8b \
-  --opc-ua-endpoint "opc.tcp://<robot-ip>:4840" \
-  --opc-ua-namespace-index 2 \
-  --opc-ua-node-template "ns={ns};s=Modbus.HoldingRegister[{address}]" \
-  --opc-ua-register-offset 0 \
+  --opc-ua-ip "<robot-ip>" \
+  --opc-ua-port 4880 \
   --opc-ua-probe-register 25 \
   --opc-ua-probe-value 3 \
   --opc-ua-probe-only
 ```
 
 Notes:
-- Mapping formula is `address = offset + R[index]`.
-- If your FANUC map differs, adjust `--opc-ua-register-offset` and `--opc-ua-node-template`.
+- FANUC helper targets `opc.tcp://<ip>:<port>/FANUC/NanoUaServer`.
+- Mapping uses FANUC default `HoldingRegisters (ns=1;i=304)` to access `R[]`.
 - Use a non-production test register for first validation.
 
 ### 3. Interactive text-only register checks
 
 ```bash
 python3 "LLM order fulfilment/order_fulfilment_controller.py" llama3.1:8b \
-  --opc-ua-endpoint "opc.tcp://<robot-ip>:4840"
+  --opc-ua-ip "<robot-ip>" \
+  --opc-ua-port 4880
 ```
 
 Then use manual commands:

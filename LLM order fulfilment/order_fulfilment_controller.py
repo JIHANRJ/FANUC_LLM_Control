@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -51,8 +53,8 @@ class Product:
 
 
 PRODUCTS: tuple[Product, ...] = (
-    Product("nuttiess_choclae", 1, "Nuttiess Choclae", ("nutties", "nutties", "nuttiess", "nutties chocolate", "nuttiess choclae", "nutties choclate")),
-    Product("nivea", 2, "NIVEA", ("nivea",)),
+    Product("nuttiess_choclae", 1, "Nuttiess Choclae", ("nutties", "nuttiess", "nutties chocolate", "nuttiess choclae", "nutties choclate", "nuttiess chocolate")),
+    Product("nivea", 2, "NIVEA", ("nivea", "niva", "niviea")),
     Product("shampoo", 3, "Shampoo", ("shampoo", "shampoo bottle", "shampoobottle")),
     Product("appy_fizz", 4, "Appy Fizz", ("appy fizz", "appyfizz")),
     Product("cough_syrup", 5, "Cough Syrup", ("cough syrup", "coughsyrup", "syrup")),
@@ -87,6 +89,8 @@ CURRENT_STATE = {
     "last_items": [],
     "last_updated": None,
 }
+
+BUILD_VERSION = "2026-04-23-local-parser-v2"
 
 
 class RegisterBackend:
@@ -157,60 +161,27 @@ class ExternalCommandRegisterBackend(RegisterBackend):
 
 
 class OpcUaRegisterBackend(RegisterBackend):
-    """Read/write FANUC-mapped holding registers over OPC UA."""
+    """Read/write FANUC registers using the local FANUC OPC UA helper."""
 
     def __init__(
         self,
         *,
-        endpoint: str,
-        namespace_index: int,
-        node_template: str,
-        register_offset: int,
-        timeout_seconds: float,
-        username: str = "",
-        password: str = "",
+        ip: str,
+        port: int,
     ) -> None:
         try:
-            from opcua import Client
+            import fanuc_register_opcua as fanuc_opcua
         except ImportError as exc:
             raise RuntimeError(
-                "OPC UA client dependency is missing. Install with: "
-                "python -m pip install opcua"
+                "fanuc_register_opcua.py is required in this folder for FANUC OPC UA register access."
             ) from exc
 
-        self._namespace_index = int(namespace_index)
-        self._node_template = node_template
-        self._register_offset = int(register_offset)
-        self._node_cache: dict[int, object] = {}
-        self._client = Client(endpoint, timeout=float(timeout_seconds))
-
-        if username.strip():
-            self._client.set_user(username.strip())
-            self._client.set_password(password)
-
-        self._client.connect()
-
-    def _address_for_register(self, register_index: int) -> int:
-        return self._register_offset + int(register_index)
-
-    def _node_id_for_address(self, address: int) -> str:
-        return self._node_template.format(ns=self._namespace_index, address=address)
-
-    def _node_for_register(self, register_index: int):
-        cache_key = int(register_index)
-        if cache_key in self._node_cache:
-            return self._node_cache[cache_key]
-
-        address = self._address_for_register(register_index)
-        node_id = self._node_id_for_address(address)
-        node = self._client.get_node(node_id)
-        self._node_cache[cache_key] = node
-        return node
+        self._fanuc = fanuc_opcua
+        self._client = self._fanuc.connect(ip=ip, port=int(port))
 
     def write_register(self, index: int, value: int) -> bool:
         try:
-            node = self._node_for_register(index)
-            node.set_value(int(value))
+            self._fanuc.write_register(self._client, int(index), int(value))
             return True
         except Exception as exc:
             print(f"[ERROR] OPC UA write failed for R[{index}]={value}: {exc}")
@@ -218,18 +189,33 @@ class OpcUaRegisterBackend(RegisterBackend):
 
     def read_register(self, index: int) -> Optional[int]:
         try:
-            node = self._node_for_register(index)
-            value = node.get_value()
-            return int(float(value))
+            value = self._fanuc.read_register(self._client, int(index))
+            return int(value)
         except Exception as exc:
             print(f"[WARN] OPC UA read failed for R[{index}]: {exc}")
             return None
 
     def close(self) -> None:
         try:
-            self._client.disconnect()
+            self._fanuc.disconnect(self._client)
         except Exception:
             pass
+
+
+def _opcua_target_from_args(args: argparse.Namespace) -> tuple[str, int] | None:
+    """Derive OPC UA target from endpoint string or explicit ip/port args."""
+    if args.opc_ua_endpoint.strip():
+        parsed = urlparse(args.opc_ua_endpoint.strip())
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            raise ValueError("--opc-ua-endpoint must include host and port, e.g. opc.tcp://192.168.1.5:4880")
+        return host, int(port)
+
+    if args.opc_ua_ip.strip():
+        return args.opc_ua_ip.strip(), int(args.opc_ua_port)
+
+    return None
 
 
 def _normalize_item(raw_item: str) -> Optional[str]:
@@ -239,6 +225,9 @@ def _normalize_item(raw_item: str) -> Optional[str]:
     normalized = raw_item.lower().strip().strip(".,;:!?")
     normalized = normalized.replace("_", " ")
     normalized = " ".join(part for part in normalized.split() if part)
+    for suffix in (" please", " pls", " kindly", " now"):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].strip()
 
     if normalized in ALIAS_TO_KEY:
         return ALIAS_TO_KEY[normalized]
@@ -301,35 +290,130 @@ Parsing rules:
 """
 
 
-def _parse_llm_output(llm_output: dict) -> tuple[str, list[tuple[str, int]]]:
-    parsed: dict = {}
-    if isinstance(llm_output.get("normalized_output"), dict):
-        parsed = llm_output["normalized_output"]
-    elif isinstance(llm_output.get("parsed_output"), dict):
-        parsed = llm_output["parsed_output"]
+_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
 
-    raw_intent = str(parsed.get("intent", "set_order")).lower().strip()
-    intent = raw_intent if raw_intent in {"set_order", "add_order", "clear_order", "status"} else "set_order"
 
+def _as_positive_int(raw_qty: object) -> Optional[int]:
+    try:
+        qty = int(float(raw_qty))
+    except (TypeError, ValueError):
+        text = str(raw_qty).strip().lower()
+        qty = _NUMBER_WORDS.get(text, -1)
+    if qty < 1:
+        return None
+    return qty
+
+
+def _extract_items_from_container(container: dict) -> list[tuple[str, int]]:
     items: list[tuple[str, int]] = []
-    raw_items = parsed.get("items", [])
-    if isinstance(raw_items, list):
-        for raw_entry in raw_items:
-            if not isinstance(raw_entry, dict):
-                continue
-            item_key = _normalize_item(str(raw_entry.get("item", "")))
-            if item_key is None:
-                continue
+    raw_items = container.get("items", [])
+    if not isinstance(raw_items, list):
+        return items
 
-            quantity = raw_entry.get("quantity", 1)
-            try:
-                qty_int = int(float(quantity))
-            except (TypeError, ValueError):
-                qty_int = 1
+    for raw_entry in raw_items:
+        if not isinstance(raw_entry, dict):
+            continue
+        item_key = _normalize_item(str(raw_entry.get("item", "")))
+        if item_key is None:
+            continue
+        qty = _as_positive_int(raw_entry.get("quantity", 1))
+        if qty is None:
+            continue
+        items.append((item_key, qty))
 
-            if qty_int < 1:
-                continue
-            items.append((item_key, qty_int))
+    return items
+
+
+def _extract_items_from_text(user_text: str) -> list[tuple[str, int]]:
+    text = user_text.lower().strip()
+    if not text:
+        return []
+
+    # Capture phrases like "4 nutties" or "three nivea" separated by comma/and/end.
+    pattern = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+([a-z_ ]+?)(?=\s*(?:,|and|&|$))"
+    matches = re.findall(pattern, text)
+    extracted: list[tuple[str, int]] = []
+
+    for raw_qty, raw_item in matches:
+        qty = _as_positive_int(raw_qty)
+        if qty is None:
+            continue
+        item_key = _normalize_item(raw_item)
+        if item_key is None:
+            continue
+        extracted.append((item_key, qty))
+
+    return extracted
+
+
+def _derive_intent_from_text(user_text: str) -> str:
+    lowered = user_text.lower()
+    if any(token in lowered for token in ("status", "current order", "show order")):
+        return "status"
+    if any(token in lowered for token in ("clear order", "reset order", "remove all", "clear all")):
+        return "clear_order"
+    if any(token in lowered for token in ("add", "plus", "increase")):
+        return "add_order"
+    return "set_order"
+
+
+def _parse_llm_output(llm_output: dict, user_text: str) -> tuple[str, list[tuple[str, int]]]:
+    candidate_containers: list[dict] = []
+    normalized_candidate = llm_output.get("normalized_output")
+    parsed_candidate = llm_output.get("parsed_output")
+    if isinstance(normalized_candidate, dict):
+        candidate_containers.append(normalized_candidate)
+    if isinstance(parsed_candidate, dict):
+        candidate_containers.append(parsed_candidate)
+
+    intent = "set_order"
+    items: list[tuple[str, int]] = []
+
+    for container in candidate_containers:
+        raw_intent = str(container.get("intent", "set_order")).lower().strip()
+        parsed_intent = raw_intent if raw_intent in {"set_order", "add_order", "clear_order", "status"} else "set_order"
+        parsed_items = _extract_items_from_container(container)
+
+        # Keep the best signal: explicit status/clear intent or any non-empty items list.
+        if parsed_intent in {"status", "clear_order"}:
+            intent = parsed_intent
+            items = parsed_items
+            break
+        if parsed_items:
+            intent = parsed_intent
+            items = parsed_items
+            break
+
+    if not items and intent in {"set_order", "add_order"}:
+        text_items = _extract_items_from_text(user_text)
+        if text_items:
+            items = text_items
+            # If user says add/increase, preserve add_order behavior.
+            lowered = user_text.lower()
+            if any(token in lowered for token in ("add", "plus", "increase")):
+                intent = "add_order"
 
     return intent, items
 
@@ -369,11 +453,16 @@ def _recompute_totals(backend: RegisterBackend) -> bool:
 def _execute_order_update(intent: str, items: list[tuple[str, int]], backend: RegisterBackend) -> dict:
     if intent == "status":
         state = _read_order_state(backend)
-        total = int(backend.read_register(ORDER_REG_TOTAL_PARTS) or sum(state.values()))
+        recomputed_total = sum(state.values())
+        total_reg = backend.read_register(ORDER_REG_TOTAL_PARTS)
+        total = int(total_reg) if total_reg is not None else recomputed_total
         unload_enable = int(backend.read_register(ORDER_REG_UNLOAD_ENABLE) or 0)
+        mismatch_note = ""
+        if total != recomputed_total:
+            mismatch_note = f" (mismatch: R[{ORDER_REG_TOTAL_PARTS}]={total}, recomputed={recomputed_total})"
         return {
             "success": True,
-            "message": f"Current order total={total}, unload_enable={unload_enable}",
+            "message": f"Current order total={total}, unload_enable={unload_enable}{mismatch_note}",
             "state": state,
         }
 
@@ -471,6 +560,10 @@ def _process_command(
         print("Goodbye!")
         return True
 
+    if lowered.startswith("python3 ") or lowered.startswith("python "):
+        print("You are inside the app prompt. Type register/order commands here, or type 'exit' and run shell commands in terminal.")
+        return False
+
     parts = user_input.split()
     if parts and parts[0].lower() == "readreg":
         if len(parts) != 2:
@@ -539,6 +632,22 @@ def _process_command(
         _validate_robot_signals(io_client)
         return False
 
+    # Deterministic local parse first for phrases like "3 nivea and 4 nutties".
+    local_intent = _derive_intent_from_text(user_input)
+    local_items = _extract_items_from_text(user_input)
+    if local_intent in {"status", "clear_order"} or local_items:
+        print(f"[PARSED:LOCAL] intent={local_intent}, items={local_items}")
+        result = _execute_order_update(local_intent, local_items, backend)
+        print(result["message"])
+        if result.get("state"):
+            _print_state_table(result["state"])
+        if result.get("success"):
+            CURRENT_STATE["last_intent"] = local_intent
+            CURRENT_STATE["last_items"] = local_items
+            CURRENT_STATE["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _validate_robot_signals(io_client)
+        return False
+
     try:
         llm_result = RobotControlLLM.TextCommand(
             model_name=args.model,
@@ -554,7 +663,7 @@ def _process_command(
             prompt=schema_prompt + f"\nUser input: {user_input}\nOutput:",
         )
 
-        intent, items = _parse_llm_output(llm_result)
+        intent, items = _parse_llm_output(llm_result, user_input)
         print(f"[PARSED] intent={intent}, items={items}")
         result = _execute_order_update(intent, items, backend)
         print(result["message"])
@@ -595,31 +704,8 @@ def main() -> None:
         help="Shell template to read a register, e.g. 'fanuc_reg_cli get {index}'",
     )
     parser.add_argument("--opc-ua-endpoint", default="", help="OPC UA endpoint, e.g. opc.tcp://192.168.1.10:4840")
-    parser.add_argument(
-        "--opc-ua-namespace-index",
-        type=int,
-        default=2,
-        help="Namespace index used in OPC UA node IDs",
-    )
-    parser.add_argument(
-        "--opc-ua-node-template",
-        default="ns={ns};s=Modbus.HoldingRegister[{address}]",
-        help="Node ID template with placeholders {ns} and {address}",
-    )
-    parser.add_argument(
-        "--opc-ua-register-offset",
-        type=int,
-        default=0,
-        help="Holding-register address offset applied as address=offset+R[index]",
-    )
-    parser.add_argument(
-        "--opc-ua-timeout",
-        type=float,
-        default=5.0,
-        help="OPC UA connect/operation timeout in seconds",
-    )
-    parser.add_argument("--opc-ua-username", default="", help="Optional OPC UA username")
-    parser.add_argument("--opc-ua-password", default="", help="Optional OPC UA password")
+    parser.add_argument("--opc-ua-ip", default="", help="FANUC controller IP for OPC UA, e.g. 192.168.1.5")
+    parser.add_argument("--opc-ua-port", type=int, default=4880, help="FANUC OPC UA port (default 4880)")
     parser.add_argument(
         "--opc-ua-probe-register",
         type=int,
@@ -656,16 +742,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.opc_ua_endpoint.strip():
+    opcua_target = None
+    try:
+        opcua_target = _opcua_target_from_args(args)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        raise SystemExit(1)
+
+    if opcua_target is not None:
         try:
+            opcua_ip, opcua_port = opcua_target
             backend = OpcUaRegisterBackend(
-                endpoint=args.opc_ua_endpoint.strip(),
-                namespace_index=args.opc_ua_namespace_index,
-                node_template=args.opc_ua_node_template,
-                register_offset=args.opc_ua_register_offset,
-                timeout_seconds=args.opc_ua_timeout,
-                username=args.opc_ua_username,
-                password=args.opc_ua_password,
+                ip=opcua_ip,
+                port=opcua_port,
             )
         except RuntimeError as exc:
             print(f"[ERROR] {exc}")
@@ -685,7 +774,8 @@ def main() -> None:
         backend_mode = "EXTERNAL_REGISTER_BRIDGE"
 
     io_client = None
-    if not args.simulation:
+    # OPC UA register mode does not require ROS2 IO dependencies.
+    if not args.simulation and backend_mode != "OPC_UA":
         if ROS2_AVAILABLE and FANUC_IO_AVAILABLE:
             try:
                 rclpy.init()
@@ -702,15 +792,15 @@ def main() -> None:
     print("\n" + "=" * 78)
     print("  LLM Order Fulfilment Controller (TP Register Logic)")
     print("=" * 78)
+    print(f"Build: {BUILD_VERSION}")
     print(f"Model: {args.model}")
     print(f"Register backend: {backend_mode}")
     if backend_mode == "OPC_UA":
-        print(f"OPC UA endpoint: {args.opc_ua_endpoint}")
-        print(f"OPC UA node template: {args.opc_ua_node_template}")
-        print(
-            "OPC UA mapping: "
-            f"address = {args.opc_ua_register_offset} + R[index], ns={args.opc_ua_namespace_index}"
-        )
+        if args.opc_ua_endpoint.strip():
+            print(f"OPC UA endpoint: {args.opc_ua_endpoint}")
+        else:
+            print(f"OPC UA endpoint: opc.tcp://{args.opc_ua_ip}:{args.opc_ua_port}/FANUC/NanoUaServer")
+        print("OPC UA mapping: FANUC default HoldingRegisters -> R[1..]")
     print(f"Robot I/O client: {'ENABLED' if io_client is not None else 'DISABLED'}")
     print("\nMapped product registers:")
     for product in PRODUCTS:
